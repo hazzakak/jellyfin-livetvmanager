@@ -1,4 +1,6 @@
-# Jellyfin Live TV Cleaner & Reset Plugin
+# Jellyfin Live TV Manager & Cleaner Plugin
+
+[![Repository](https://img.shields.io/badge/GitHub-hazzakak%2Fjellyfin--livetvmanager-blue?logo=github)](https://github.com/hazzakak/jellyfin-livetvmanager)
 
 A specialized Jellyfin plugin designed to solve the persistent issue where deleted or modified Live TV tuners leave behind orphaned channels and guide data with no native way to delete them.
 
