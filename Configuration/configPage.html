@@ -236,7 +236,7 @@
                 <div class="sectionTitleContainer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5em; margin-bottom:1em;">
                     <div style="display:flex; align-items:center; gap:0.8em; flex-wrap:wrap;">
                         <h2 class="sectionTitle" style="margin:0;">Live TV Cleaner &amp; Channel Manager</h2>
-                        <span id="pluginVersionBadge" class="badge" style="background: rgba(0, 164, 220, 0.2); color: #00a4dc; border: 1px solid rgba(0, 164, 220, 0.4); font-size: 0.85em; font-weight:700; padding: 0.3em 0.8em; border-radius: 4px;">v1.0.4.0</span>
+                        <span id="pluginVersionBadge" class="badge" style="background: rgba(0, 164, 220, 0.2); color: #00a4dc; border: 1px solid rgba(0, 164, 220, 0.4); font-size: 0.85em; font-weight:700; padding: 0.3em 0.8em; border-radius: 4px;">v1.0.5.0</span>
                     </div>
                 </div>
 
@@ -596,7 +596,7 @@
                         if (searchTerm) {
                             var name = (c.Name || '').toLowerCase();
                             var num = (c.Number || '').toLowerCase();
-                            var tuner = (c.TunerName || c.ServiceName || '').toLowerCase();
+                            var tuner = (c.IsOrphaned ? (c.TunerName || 'deleted tuner') : (c.TunerName || c.ServiceName || 'active tuner')).toLowerCase();
                             if (name.indexOf(searchTerm) === -1 && num.indexOf(searchTerm) === -1 && tuner.indexOf(searchTerm) === -1) {
                                 return false;
                             }
@@ -641,7 +641,9 @@
                             ? '<span class="badge badge-orphaned">Orphaned</span>'
                             : '<span class="badge badge-active">Active</span>';
 
-                        var tunerLabel = ch.TunerName || ch.ServiceName || (ch.IsOrphaned ? 'Deleted Tuner' : 'Unknown');
+                        var tunerLabel = ch.IsOrphaned
+                            ? (ch.TunerName && ch.TunerName !== 'Emby' ? ch.TunerName : 'Deleted Tuner')
+                            : (ch.TunerName || ch.ServiceName || 'Active Tuner');
 
                         html += '<tr data-id="' + ch.Id + '">' +
                             '<td><input type="checkbox" class="chk-channel" data-id="' + ch.Id + '" ' + isChecked + ' /></td>' +

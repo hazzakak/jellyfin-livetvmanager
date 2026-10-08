@@ -37,7 +37,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// <summary>
     /// Gets the current plugin version as a string.
     /// </summary>
-    public static string PluginVersion => typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "1.0.4.0";
+    public static string PluginVersion => typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "1.0.5.0";
 
     /// <summary>
     /// Gets the current plugin instance.

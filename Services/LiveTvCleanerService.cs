@@ -101,14 +101,14 @@ public class LiveTvCleanerService : ILiveTvCleanerService
     }
 
     /// <inheritdoc />
-    public Task<CleanerStatusDto> GetStatusAsync(CancellationToken cancellationToken)
+    public async Task<CleanerStatusDto> GetStatusAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         var channels = GetChannelsFromDb();
         var programCount = GetProgramCount();
         var tuners = GetConfiguredTuners();
-        var orphanStatus = DetermineOrphanStatus(channels, tuners, cancellationToken);
+        var orphanStatus = await DetermineOrphanStatusAsync(channels, tuners, cancellationToken).ConfigureAwait(false);
 
         var orphanedCount = orphanStatus.Count(kv => kv.Value.IsOrphaned);
         var activeCount = channels.Count - orphanedCount;
@@ -133,17 +133,17 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             PluginVersion = Plugin.PluginVersion
         };
 
-        return Task.FromResult(status);
+        return status;
     }
 
     /// <inheritdoc />
-    public Task<IReadOnlyList<ChannelDto>> GetChannelsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ChannelDto>> GetChannelsAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         var channels = GetChannelsFromDb();
         var tuners = GetConfiguredTuners();
-        var orphanStatus = DetermineOrphanStatus(channels, tuners, cancellationToken);
+        var orphanStatus = await DetermineOrphanStatusAsync(channels, tuners, cancellationToken).ConfigureAwait(false);
         var programCounts = GetProgramCountsByChannel();
 
         var result = new List<ChannelDto>(channels.Count);
@@ -166,7 +166,7 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             });
         }
 
-        return Task.FromResult<IReadOnlyList<ChannelDto>>(result.OrderBy(c => c.Number).ThenBy(c => c.Name).ToList());
+        return result.OrderBy(c => c.Number).ThenBy(c => c.Name).ToList();
     }
 
     /// <inheritdoc />
@@ -221,7 +221,7 @@ public class LiveTvCleanerService : ILiveTvCleanerService
 
             var channels = GetChannelsFromDb();
             var tuners = GetConfiguredTuners();
-            var orphanStatus = DetermineOrphanStatus(channels, tuners, token);
+            var orphanStatus = await DetermineOrphanStatusAsync(channels, tuners, token).ConfigureAwait(false);
 
             var orphanedIds = orphanStatus
                 .Where(kv => kv.Value.IsOrphaned)
@@ -825,12 +825,12 @@ public class LiveTvCleanerService : ILiveTvCleanerService
 
     private sealed record ChannelStatusRecord(bool IsOrphaned, string MatchedTunerName);
 
-    private Dictionary<Guid, ChannelStatusRecord> DetermineOrphanStatus(
+    private async Task<Dictionary<Guid, ChannelStatusRecord>> DetermineOrphanStatusAsync(
         IReadOnlyList<LiveTvChannel> channels,
         TunerHostInfo[] tuners,
         CancellationToken cancellationToken)
     {
-        var result = new Dictionary<Guid, ChannelStatusRecord>();
+        var result = new Dictionary<Guid, ChannelStatusRecord>(channels.Count);
 
         // If no tuners exist, every single channel is orphaned
         if (tuners.Length == 0)
@@ -843,14 +843,23 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             return result;
         }
 
-        // Build valid keys from configured tuners
+        // Build valid keys and host lookups from configured tuners
         var tunerKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tunerHosts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tunerHostAndPorts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        var singleTuner = tuners.Length == 1 ? tuners[0] : null;
+        var singleTunerName = singleTuner != null
+            ? (!string.IsNullOrWhiteSpace(singleTuner.FriendlyName)
+                ? singleTuner.FriendlyName
+                : (!string.IsNullOrWhiteSpace(singleTuner.Type) ? singleTuner.Type : "Configured Tuner"))
+            : string.Empty;
 
         foreach (var tuner in tuners)
         {
-            var displayName = string.IsNullOrWhiteSpace(tuner.FriendlyName)
-                ? (tuner.Type ?? "Tuner")
-                : tuner.FriendlyName;
+            var displayName = !string.IsNullOrWhiteSpace(tuner.FriendlyName)
+                ? tuner.FriendlyName
+                : (!string.IsNullOrWhiteSpace(tuner.Type) ? tuner.Type : "Configured Tuner");
 
             if (!string.IsNullOrWhiteSpace(tuner.Id))
             {
@@ -867,31 +876,236 @@ public class LiveTvCleanerService : ILiveTvCleanerService
                 var hash = ComputeMd5(tuner.Url);
                 tunerKeys[hash] = displayName;
                 tunerKeys["m3u_" + hash] = displayName;
+
+                if (Uri.TryCreate(tuner.Url, UriKind.Absolute, out var tunerUri) && !string.IsNullOrEmpty(tunerUri.Host))
+                {
+                    tunerHosts[tunerUri.Host] = displayName;
+                    tunerHostAndPorts[$"{tunerUri.Host}:{tunerUri.Port}"] = displayName;
+                }
             }
         }
 
-        // Check each channel
+        // Query active LiveTv services (e.g. EmbyTV) to collect known active channel identifiers
+        var knownExternalIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var knownPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var knownNumberAndNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+            var services = _liveTvManager.Services;
+            if (services != null)
+            {
+                foreach (var service in services)
+                {
+                    if (service == null)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var serviceName = !string.IsNullOrWhiteSpace(service.Name) ? service.Name : "Live TV Service";
+                        var serviceChannels = await service.GetChannelsAsync(linkedCts.Token).ConfigureAwait(false);
+                        if (serviceChannels != null)
+                        {
+                            foreach (var sc in serviceChannels)
+                            {
+                                if (!string.IsNullOrEmpty(sc.Id))
+                                {
+                                    knownExternalIds[sc.Id] = serviceName;
+                                }
+
+                                if (!string.IsNullOrEmpty(sc.TunerChannelId))
+                                {
+                                    knownExternalIds[sc.TunerChannelId] = serviceName;
+                                }
+
+                                if (!string.IsNullOrEmpty(sc.Path))
+                                {
+                                    knownPaths[sc.Path] = serviceName;
+                                }
+
+                                if (!string.IsNullOrWhiteSpace(sc.Number) && !string.IsNullOrWhiteSpace(sc.Name))
+                                {
+                                    knownNumberAndNames[$"{sc.Number.Trim()}_{sc.Name.Trim()}"] = serviceName;
+                                }
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+                    {
+                        _logger.LogWarning("Timed out querying Live TV service {ServiceName} for active channels", service.Name);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to query channels from Live TV service {ServiceName}", service.Name);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query Live TV services for active channels");
+        }
+
+        _logger.LogDebug(
+            "Channel orphan check setup: {ChannelCount} DB channels, {TunerCount} tuners, {KeyCount} keys, {HostCount} hosts, {ServiceExtCount} service IDs, {ServicePathCount} service paths",
+            channels.Count,
+            tuners.Length,
+            tunerKeys.Count,
+            tunerHosts.Count,
+            knownExternalIds.Count,
+            knownPaths.Count);
+
+        // Check each DB channel against active sources
         foreach (var channel in channels)
         {
             var externalId = channel.ExternalId ?? string.Empty;
             var path = channel.Path ?? string.Empty;
+            var number = channel.Number ?? string.Empty;
+            var name = channel.Name ?? string.Empty;
 
             var matchedTuner = string.Empty;
             var isMatched = false;
 
-            foreach (var (key, tunerName) in tunerKeys)
+            // 1. Check exact match from Live TV service query
+            if (!string.IsNullOrEmpty(externalId) && knownExternalIds.TryGetValue(externalId, out var sName1))
             {
-                if ((!string.IsNullOrEmpty(externalId) && externalId.Contains(key, StringComparison.OrdinalIgnoreCase))
-                    || (!string.IsNullOrEmpty(path) && path.Contains(key, StringComparison.OrdinalIgnoreCase)))
+                matchedTuner = sName1;
+                isMatched = true;
+            }
+            else if (!string.IsNullOrEmpty(path) && knownPaths.TryGetValue(path, out var sName2))
+            {
+                matchedTuner = sName2;
+                isMatched = true;
+            }
+            else if (!string.IsNullOrWhiteSpace(number) && !string.IsNullOrWhiteSpace(name)
+                     && knownNumberAndNames.TryGetValue($"{number.Trim()}_{name.Trim()}", out var sName3))
+            {
+                matchedTuner = sName3;
+                isMatched = true;
+            }
+
+            // 2. Check tuner keys (Id, DeviceId, URL MD5 hash)
+            if (!isMatched)
+            {
+                foreach (var (key, tName) in tunerKeys)
                 {
-                    matchedTuner = tunerName;
-                    isMatched = true;
-                    break;
+                    if ((!string.IsNullOrEmpty(externalId) && externalId.Contains(key, StringComparison.OrdinalIgnoreCase))
+                        || (!string.IsNullOrEmpty(path) && path.Contains(key, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        matchedTuner = tName;
+                        isMatched = true;
+                        break;
+                    }
                 }
             }
 
-            result[channel.Id] = new ChannelStatusRecord(!isMatched, matchedTuner);
+            // 3. Check Host / URL matching (IPTV stream host matching tuner playlist host)
+            if (!isMatched && !string.IsNullOrEmpty(path))
+            {
+                if (Uri.TryCreate(path, UriKind.Absolute, out var chUri) && !string.IsNullOrEmpty(chUri.Host))
+                {
+                    var hostPortKey = $"{chUri.Host}:{chUri.Port}";
+                    if (tunerHostAndPorts.TryGetValue(hostPortKey, out var hpMatch))
+                    {
+                        matchedTuner = hpMatch;
+                        isMatched = true;
+                    }
+                    else if (tunerHosts.TryGetValue(chUri.Host, out var hostMatch))
+                    {
+                        matchedTuner = hostMatch;
+                        isMatched = true;
+                    }
+                    else
+                    {
+                        // Check subdomain or parent domain matching
+                        foreach (var (tHost, tName) in tunerHosts)
+                        {
+                            if (chUri.Host.EndsWith("." + tHost, StringComparison.OrdinalIgnoreCase)
+                                || tHost.EndsWith("." + chUri.Host, StringComparison.OrdinalIgnoreCase))
+                            {
+                                matchedTuner = tName;
+                                isMatched = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // If not parsed as absolute URI, check substring against tuner hosts
+                    foreach (var (host, tName) in tunerHosts)
+                    {
+                        if (path.Contains(host, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matchedTuner = tName;
+                            isMatched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 4. Single tuner fallback:
+            // If only 1 tuner is configured in the entire system and it does not use HTTP hosts (e.g. local file or pipe),
+            // any channel with a matching service name belongs to that tuner.
+            if (!isMatched && singleTuner != null && tunerHosts.Count == 0)
+            {
+                if (string.Equals(channel.ServiceName, "Emby", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(channel.ServiceName, "EmbyTV", StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrEmpty(channel.ServiceName))
+                {
+                    matchedTuner = singleTunerName;
+                    isMatched = true;
+                }
+            }
+
+            // Resolve friendly tuner name if matched name is generic
+            if (isMatched)
+            {
+                if (string.IsNullOrEmpty(matchedTuner)
+                    || string.Equals(matchedTuner, "Emby", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(matchedTuner, "EmbyTV", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(matchedTuner, "Live TV Service", StringComparison.OrdinalIgnoreCase))
+                {
+                    // If channel stream path matches a known tuner host, use that specific tuner's friendly name
+                    if (!string.IsNullOrEmpty(path) && Uri.TryCreate(path, UriKind.Absolute, out var streamUri) && !string.IsNullOrEmpty(streamUri.Host))
+                    {
+                        if (tunerHosts.TryGetValue(streamUri.Host, out var specificTunerName))
+                        {
+                            matchedTuner = specificTunerName;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(matchedTuner) || string.Equals(matchedTuner, "Emby", StringComparison.OrdinalIgnoreCase) || string.Equals(matchedTuner, "EmbyTV", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (singleTuner != null)
+                        {
+                            matchedTuner = singleTunerName;
+                        }
+                        else if (tunerKeys.Count > 0)
+                        {
+                            matchedTuner = tunerKeys.Values.FirstOrDefault() ?? "Active Tuner";
+                        }
+                    }
+                }
+            }
+
+            result[channel.Id] = new ChannelStatusRecord(!isMatched, isMatched ? matchedTuner : "No matching tuner");
         }
+
+        var orphanedTotal = result.Values.Count(r => r.IsOrphaned);
+        var activeTotal = channels.Count - orphanedTotal;
+        _logger.LogInformation(
+            "Orphan status check completed: {ActiveCount} active, {OrphanCount} orphaned out of {TotalCount} total channels across {TunerCount} configured tuners",
+            activeTotal,
+            orphanedTotal,
+            channels.Count,
+            tuners.Length);
 
         return result;
     }
