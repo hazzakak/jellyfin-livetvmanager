@@ -47,7 +47,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             new PluginPageInfo
             {
                 Name = Name,
-                EmbeddedResourcePath = string.Format(CultureInfo.InvariantCulture, "{0}.Configuration.configPage.html", GetType().Namespace)
+                DisplayName = "Live TV Cleaner",
+                EmbeddedResourcePath = string.Format(CultureInfo.InvariantCulture, "{0}.Configuration.configPage.html", GetType().Namespace),
+                EnableInMainMenu = true,
+                MenuSection = "Live TV",
+                MenuIcon = "live_tv"
             }
         ];
     }

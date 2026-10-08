@@ -556,11 +556,31 @@
                 }
 
                 var page = document.querySelector('#LiveTvCleanerConfigPage');
+                var initialLoadDone = false;
+
+                function initPage() {
+                    if (initialLoadDone) return;
+                    initialLoadDone = true;
+                    loadStatus();
+                    loadChannels();
+                }
 
                 page.addEventListener('pageshow', function () {
                     loadStatus();
                     loadChannels();
                 });
+
+                page.addEventListener('viewshow', function () {
+                    loadStatus();
+                    loadChannels();
+                });
+
+                // Fallback in case events do not fire on direct link navigation
+                setTimeout(function () {
+                    if (!initialLoadDone && allChannels.length === 0) {
+                        initPage();
+                    }
+                }, 300);
 
                 document.querySelector('#btnCleanOrphaned').addEventListener('click', cleanOrphanedChannels);
                 document.querySelector('#btnResetAll').addEventListener('click', resetAllChannels);
