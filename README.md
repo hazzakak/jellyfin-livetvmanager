@@ -42,9 +42,28 @@ A specialized Jellyfin plugin designed to solve the persistent issue where delet
 
 ---
 
-## 🚀 Installation
+## 🚀 Installation & Seamless Updates
 
-### Option 1: Copy to your Jellyfin Server (Proxmox / Docker / Linux)
+### Option 1: Add as a Plugin Repository (Recommended — One-Click Install & Auto-Updates)
+
+You can add this repository directly into Jellyfin so it shows up in your Catalog and updates seamlessly whenever a new version is released:
+
+1. Open your Jellyfin Web UI.
+2. Navigate to **Dashboard → Plugins → Repositories** tab.
+3. Click the **"+" (Add)** button.
+4. Enter:
+   - **Repository Name**: `Live TV Manager`
+   - **Repository URL**: `https://raw.githubusercontent.com/hazzakak/jellyfin-livetvmanager/main/manifest.json`
+5. Click **Save**.
+6. Switch to the **Catalog** tab under Plugins.
+7. Locate **Live TV Cleaner**, click it, and hit **Install**!
+8. Restart Jellyfin when prompted.
+
+> 💡 **Seamless Updates**: When an update is published to this GitHub repository, Jellyfin's automated update checker will notify you in **Dashboard → Plugins → Catalog** with an **Update** button.
+
+---
+
+### Option 2: Manual DLL Copy (Proxmox / Docker / Linux)
 
 1. Build the plugin (Release):
    ```bash
