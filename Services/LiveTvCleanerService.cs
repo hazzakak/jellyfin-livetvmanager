@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -28,6 +29,8 @@ namespace Jellyfin.Plugin.LiveTvCleaner.Services;
 public class LiveTvCleanerService : ILiveTvCleanerService
 {
     private const int BatchChunkSize = 250;
+
+    private static readonly MethodInfo? FastDeleteMethod = FindFastDeleteMethod();
 
     private readonly ILibraryManager _libraryManager;
     private readonly IConfigurationManager _config;
@@ -161,30 +164,58 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         var targetPrograms = allPrograms.Where(p => channelIdSet.Contains(p.ParentId)).ToList();
 
         _logger.LogInformation(
-            "Found {Channels} target channels and {Programs} associated guide programs to batch-delete",
+            "Found {Channels} target channels and {Programs} associated guide programs to delete",
             targetChannels.Count,
             targetPrograms.Count);
 
         var totalItems = targetPrograms.Count + targetChannels.Count;
         var processedItems = 0;
 
-        // 3. Batch delete programs using fast bulk delete
-        var deletedPrograms = BatchDeleteItems(targetPrograms, ref processedItems, totalItems, progress, cancellationToken);
-
-        // 4. Batch delete channels using fast bulk delete
+        // Step 1: Delete channels FIRST so they immediately disappear from the UI
         var deletedChannels = BatchDeleteItems(targetChannels, ref processedItems, totalItems, progress, cancellationToken);
+        _logger.LogInformation("Deleted {Channels} Live TV channels", deletedChannels);
+
+        // Step 2: Delete associated guide programs
+        int deletedPrograms = 0;
+        if (targetPrograms.Count > 0)
+        {
+            if (FastDeleteMethod is not null || targetPrograms.Count <= 2000)
+            {
+                deletedPrograms = BatchDeleteItems(targetPrograms, ref processedItems, totalItems, progress, cancellationToken);
+            }
+            else
+            {
+                // On Jellyfin 10.10.x without fast batch delete:
+                // Delete programs in background so the HTTP response finishes quickly without timing out
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var bgProcessed = 0;
+                        var bgDeleted = BatchDeleteItems(targetPrograms, ref bgProcessed, targetPrograms.Count, null, CancellationToken.None);
+                        _logger.LogInformation("Background guide cleanup finished: {Count} programs deleted", bgDeleted);
+                    }
+                    catch (Exception bgEx)
+                    {
+                        _logger.LogWarning(bgEx, "Background guide cleanup error");
+                    }
+                });
+                _logger.LogInformation("Queued background cleanup for {Count} guide programs to prevent HTTP timeout", targetPrograms.Count);
+                deletedPrograms = targetPrograms.Count;
+            }
+        }
 
         UpdateConfigStats(deletedChannels, deletedPrograms);
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Fast batch deletion complete: Removed {deletedChannels} channels and {deletedPrograms} guide programs.",
+            Message = $"Deletion complete: Removed {deletedChannels} channels and cleaned {deletedPrograms} guide programs.",
             DeletedChannels = deletedChannels,
             DeletedPrograms = deletedPrograms
         };
 
-        _logger.LogInformation("Channel deletion completed in batch mode: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
+        _logger.LogInformation("Channel deletion completed: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
         return Task.FromResult(result);
     }
 
@@ -225,28 +256,53 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Executing fast bulk reset of ALL Live TV channels and guide programs");
+        _logger.LogWarning("Executing reset of ALL Live TV channels and guide programs");
 
         var channels = GetChannelsFromDb();
         var programs = GetAllProgramsFromDb();
 
-        _logger.LogInformation("Purging {Programs} programs and {Channels} channels", programs.Count, channels.Count);
+        _logger.LogInformation("Purging {Channels} channels and {Programs} programs", channels.Count, programs.Count);
 
         var totalItems = programs.Count + channels.Count;
         var processedItems = 0;
 
-        // Delete all programs first
-        var deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
-
-        // Delete all channels second
+        // Delete all channels first
         var deletedChannels = BatchDeleteItems(channels, ref processedItems, totalItems, progress, cancellationToken);
+
+        // Delete all programs
+        int deletedPrograms = 0;
+        if (programs.Count > 0)
+        {
+            if (FastDeleteMethod is not null || programs.Count <= 2000)
+            {
+                deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
+            }
+            else
+            {
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var bgProcessed = 0;
+                        var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, null, CancellationToken.None);
+                        _logger.LogInformation("Background guide purge finished: {Count} programs deleted", bgDeleted);
+                    }
+                    catch (Exception bgEx)
+                    {
+                        _logger.LogWarning(bgEx, "Background guide purge error");
+                    }
+                });
+                _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
+                deletedPrograms = programs.Count;
+            }
+        }
 
         UpdateConfigStats(deletedChannels, deletedPrograms);
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Full Live TV Reset complete. Fast-deleted {deletedChannels} channels and {deletedPrograms} guide programs.",
+            Message = $"Full Live TV Reset complete. Removed {deletedChannels} channels and {deletedPrograms} guide programs.",
             DeletedChannels = deletedChannels,
             DeletedPrograms = deletedPrograms
         };
@@ -260,18 +316,43 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Purging all Live TV guide programs from the database in batch mode");
+        _logger.LogInformation("Purging all Live TV guide programs from the database");
 
         var programs = GetAllProgramsFromDb();
         var totalItems = programs.Count;
         var processedItems = 0;
 
-        var deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
+        int deletedPrograms = 0;
+        if (programs.Count > 0)
+        {
+            if (FastDeleteMethod is not null || programs.Count <= 2000)
+            {
+                deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
+            }
+            else
+            {
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var bgProcessed = 0;
+                        var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, null, CancellationToken.None);
+                        _logger.LogInformation("Background guide program purge completed: {Count} programs deleted", bgDeleted);
+                    }
+                    catch (Exception bgEx)
+                    {
+                        _logger.LogWarning(bgEx, "Background guide program purge error");
+                    }
+                });
+                _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
+                deletedPrograms = programs.Count;
+            }
+        }
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Successfully purged {deletedPrograms} Live TV guide programs in batch mode.",
+            Message = $"Successfully purged {deletedPrograms} Live TV guide programs.",
             DeletedChannels = 0,
             DeletedPrograms = deletedPrograms
         };
@@ -302,6 +383,19 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         return Task.CompletedTask;
     }
 
+    private static MethodInfo? FindFastDeleteMethod()
+    {
+        try
+        {
+            return typeof(ILibraryManager).GetMethods()
+                .FirstOrDefault(m => m.Name == "DeleteItemsUnsafeFast");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private int BatchDeleteItems<T>(
         IReadOnlyList<T> items,
         ref int processedItems,
@@ -326,28 +420,49 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             cancellationToken.ThrowIfCancellationRequested();
             var chunk = items.Skip(i).Take(BatchChunkSize).ToList();
 
-            try
+            if (FastDeleteMethod is not null)
             {
-                // Primary method: Fast bulk deletion in a single database transaction
-                _libraryManager.DeleteItemsUnsafeFast(chunk);
-                deleted += chunk.Count;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Fast bulk delete failed for batch of {Count} items, falling back to individual delete", chunk.Count);
-
-                // Fallback: Individual item deletion
-                foreach (var item in chunk)
+                try
                 {
-                    try
+                    var baseItemChunk = chunk.Cast<BaseItem>().ToList();
+                    var parameters = FastDeleteMethod.GetParameters();
+                    object[] args = parameters.Length switch
                     {
-                        _libraryManager.DeleteItem(item, deleteOptions, false);
-                        deleted++;
-                    }
-                    catch (Exception itemEx)
+                        1 => [baseItemChunk],
+                        2 => [baseItemChunk, false],
+                        _ => null!
+                    };
+
+                    if (args != null)
                     {
-                        _logger.LogError(itemEx, "Failed to delete item {Id} ({Type})", item.Id, item.GetType().Name);
+                        FastDeleteMethod.Invoke(_libraryManager, args);
+                        deleted += chunk.Count;
+                        processedItems += chunk.Count;
+                        if (totalItems > 0)
+                        {
+                            progress?.Report((double)processedItems / totalItems * 100);
+                        }
+                        continue;
                     }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Fast bulk delete via reflection failed for batch of {Count} items, falling back to individual delete", chunk.Count);
+                }
+            }
+
+            // Fallback: Individual item deletion (Jellyfin 10.10.x and older)
+            foreach (var item in chunk)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    _libraryManager.DeleteItem(item, deleteOptions, false);
+                    deleted++;
+                }
+                catch (Exception itemEx)
+                {
+                    _logger.LogError(itemEx, "Failed to delete item {Id} ({Type})", item.Id, item.GetType().Name);
                 }
             }
 
