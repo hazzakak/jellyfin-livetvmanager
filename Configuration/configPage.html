@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Live TV Cleaner</title>
+</head>
+<body>
+    <div id="LiveTvCleanerConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-button,emby-input,emby-select,emby-checkbox">
+        <style>
+            .cleaner-container {
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 1em 0;
+            }
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 1em;
+                margin-bottom: 1.5em;
+            }
+            .stat-card {
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                padding: 1.2em;
+                text-align: center;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            }
+            .stat-value {
+                font-size: 2em;
+                font-weight: 700;
+                margin-bottom: 0.2em;
+            }
+            .stat-label {
+                font-size: 0.85em;
+                color: #aaa;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            .stat-orphaned {
+                color: #ff5252;
+            }
+            .stat-active {
+                color: #69f0ae;
+            }
+            .stat-total {
+                color: #40c4ff;
+            }
+            .stat-programs {
+                color: #ffd740;
+            }
+            .actions-bar {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.8em;
+                margin-bottom: 1.5em;
+                align-items: center;
+            }
+            .button-danger {
+                background-color: #d32f2f !important;
+                color: #fff !important;
+            }
+            .button-danger:hover {
+                background-color: #b71c1c !important;
+            }
+            .button-warning {
+                background-color: #f57c00 !important;
+                color: #fff !important;
+            }
+            .button-warning:hover {
+                background-color: #e65100 !important;
+            }
+            .button-accent {
+                background-color: #00a4dc !important;
+                color: #fff !important;
+            }
+            .button-accent:hover {
+                background-color: #0084b0 !important;
+            }
+            .table-container {
+                overflow-x: auto;
+                background: rgba(0,0,0,0.2);
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.08);
+                margin-top: 1em;
+            }
+            .cleaner-table {
+                width: 100%;
+                border-collapse: collapse;
+                text-align: left;
+                font-size: 0.9em;
+            }
+            .cleaner-table th, .cleaner-table td {
+                padding: 0.8em 1em;
+                border-bottom: 1px solid rgba(255,255,255,0.05);
+            }
+            .cleaner-table th {
+                background: rgba(255,255,255,0.04);
+                font-weight: 600;
+            }
+            .cleaner-table tr:hover {
+                background: rgba(255,255,255,0.02);
+            }
+            .badge {
+                display: inline-block;
+                padding: 0.25em 0.6em;
+                border-radius: 4px;
+                font-size: 0.8em;
+                font-weight: 600;
+                text-transform: uppercase;
+            }
+            .badge-orphaned {
+                background: rgba(244, 67, 54, 0.2);
+                color: #ff5252;
+                border: 1px solid rgba(244, 67, 54, 0.4);
+            }
+            .badge-active {
+                background: rgba(76, 175, 80, 0.2);
+                color: #69f0ae;
+                border: 1px solid rgba(76, 175, 80, 0.4);
+            }
+            .filter-bar {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 1em;
+                align-items: center;
+                margin-bottom: 1em;
+            }
+            .filter-input {
+                flex: 1;
+                min-width: 200px;
+            }
+            .alert-box {
+                padding: 1em;
+                border-radius: 8px;
+                margin-bottom: 1.5em;
+                background: rgba(33, 150, 243, 0.1);
+                border-left: 4px solid #2196f3;
+                font-size: 0.9em;
+                line-height: 1.4;
+            }
+            .alert-box strong {
+                color: #fff;
+            }
+            .btn-mini {
+                padding: 0.3em 0.6em;
+                font-size: 0.8em;
+                min-height: auto;
+            }
+        </style>
+
+        <div data-role="content">
+            <div class="content-primary cleaner-container">
+                <div class="sectionTitleContainer">
+                    <h2 class="sectionTitle">Live TV Cleaner &amp; Channel Manager</h2>
+                </div>
+
+                <div class="alert-box">
+                    <strong>Manage &amp; Reset Live TV:</strong> When tuners are removed or M3U lists change, Jellyfin frequently retains orphaned channels because the core server disallows deleting Live TV channels directly. This utility allows you to safely purge orphaned channels, force-delete specific channels, or perform a complete Live TV reset.
+                </div>
+
+                <!-- Stats Overview -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div id="statTotalChannels" class="stat-value stat-total">0</div>
+                        <div class="stat-label">Total Channels</div>
+                    </div>
+                    <div class="stat-card">
+                        <div id="statActiveChannels" class="stat-value stat-active">0</div>
+                        <div class="stat-label">Active Channels</div>
+                    </div>
+                    <div class="stat-card">
+                        <div id="statOrphanedChannels" class="stat-value stat-orphaned">0</div>
+                        <div class="stat-label">Orphaned Channels</div>
+                    </div>
+                    <div class="stat-card">
+                        <div id="statTotalPrograms" class="stat-value stat-programs">0</div>
+                        <div class="stat-label">Guide Programs</div>
+                    </div>
+                    <div class="stat-card">
+                        <div id="statConfiguredTuners" class="stat-value">0</div>
+                        <div class="stat-label">Configured Tuners</div>
+                    </div>
+                    <div class="stat-card">
+                        <div id="statLastClean" class="stat-value" style="font-size:1.1em; line-height:2em;">Never</div>
+                        <div class="stat-label">Last Cleaned</div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="actions-bar">
+                    <button is="emby-button" type="button" id="btnCleanOrphaned" class="raised button-accent emby-button">
+                        <span>Clean Orphaned Channels</span>
+                    </button>
+                    <button is="emby-button" type="button" id="btnResetAll" class="raised button-danger emby-button">
+                        <span>Reset All Live TV Channels</span>
+                    </button>
+                    <button is="emby-button" type="button" id="btnPurgePrograms" class="raised button-warning emby-button">
+                        <span>Purge Guide Data Only</span>
+                    </button>
+                    <button is="emby-button" type="button" id="btnRefreshGuide" class="raised emby-button">
+                        <span>Refresh Guide &amp; Tuners</span>
+                    </button>
+                    <button is="emby-button" type="button" id="btnReload" class="raised emby-button">
+                        <span>Reload Status</span>
+                    </button>
+                </div>
+
+                <!-- Filter & Search Bar -->
+                <div class="filter-bar">
+                    <div class="inputContainer filter-input" style="margin-bottom:0;">
+                        <input is="emby-input" type="text" id="txtSearch" placeholder="Filter channels by name, number, or tuner..." />
+                    </div>
+                    <div class="selectContainer" style="margin-bottom:0;">
+                        <select is="emby-select" id="selFilter">
+                            <option value="all">All Channels</option>
+                            <option value="orphaned" selected>Orphaned Only</option>
+                            <option value="active">Active Only</option>
+                        </select>
+                    </div>
+                    <div>
+                        <button is="emby-button" type="button" id="btnDeleteSelected" class="raised button-danger emby-button" style="display:none;">
+                            <span id="btnDeleteSelectedText">Delete Selected (0)</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Channels Table -->
+                <div class="table-container">
+                    <table class="cleaner-table" id="tblChannels">
+                        <thead>
+                            <tr>
+                                <th style="width:30px;"><input type="checkbox" id="chkSelectAll" /></th>
+                                <th style="width:70px;">Number</th>
+                                <th>Name</th>
+                                <th style="width:110px;">Status</th>
+                                <th>Tuner / Source</th>
+                                <th style="width:80px;">Programs</th>
+                                <th style="width:90px; text-align:center;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tblChannelsBody">
+                            <tr>
+                                <td colspan="7" style="text-align:center; padding: 2em; color: #888;">
+                                    Loading channels...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                var pluginId = 'a5d6f3e1-8842-4217-bf41-4824e86dbdf9';
+                var allChannels = [];
+                var selectedChannelIds = new Set();
+
+                function getApiUrl(path) {
+                    return ApiClient.getUrl('LiveTvCleaner/' + path);
+                }
+
+                function makeApiRequest(endpoint, method, data) {
+                    var options = {
+                        type: method || 'GET',
+                        url: getApiUrl(endpoint),
+                        dataType: 'json',
+                        contentType: 'application/json'
+                    };
+
+                    if (data && method !== 'GET') {
+                        options.data = JSON.stringify(data);
+                    }
+
+                    return ApiClient.ajax(options);
+                }
+
+                function loadStatus() {
+                    Dashboard.showLoadingMsg();
+                    makeApiRequest('Status', 'GET')
+                        .then(function (status) {
+                            document.querySelector('#statTotalChannels').textContent = (status.TotalChannels || 0).toLocaleString();
+                            document.querySelector('#statActiveChannels').textContent = (status.ActiveChannelsCount || 0).toLocaleString();
+                            document.querySelector('#statOrphanedChannels').textContent = (status.OrphanedChannelsCount || 0).toLocaleString();
+                            document.querySelector('#statTotalPrograms').textContent = (status.TotalPrograms || 0).toLocaleString();
+                            document.querySelector('#statConfiguredTuners').textContent = (status.ConfiguredTuners ? status.ConfiguredTuners.length : 0);
+
+                            if (status.LastCleanDate) {
+                                var d = new Date(status.LastCleanDate);
+                                document.querySelector('#statLastClean').textContent = d.toLocaleDateString() + ' (' + status.LastCleanedCount + ')';
+                            } else {
+                                document.querySelector('#statLastClean').textContent = 'Never';
+                            }
+                            Dashboard.hideLoadingMsg();
+                        })
+                        .catch(function (err) {
+                            Dashboard.hideLoadingMsg();
+                            console.error('Failed to load status', err);
+                        });
+                }
+
+                function loadChannels() {
+                    Dashboard.showLoadingMsg();
+                    makeApiRequest('Channels', 'GET')
+                        .then(function (channels) {
+                            allChannels = channels || [];
+                            selectedChannelIds.clear();
+                            updateBulkButton();
+                            renderChannels();
+                            Dashboard.hideLoadingMsg();
+                        })
+                        .catch(function (err) {
+                            Dashboard.hideLoadingMsg();
+                            console.error('Failed to load channels', err);
+                            document.querySelector('#tblChannelsBody').innerHTML =
+                                '<tr><td colspan="7" style="text-align:center; color:#ff5252; padding:2em;">Failed to load channels.</td></tr>';
+                        });
+                }
+
+                function renderChannels() {
+                    var searchTerm = (document.querySelector('#txtSearch').value || '').trim().toLowerCase();
+                    var filter = document.querySelector('#selFilter').value;
+
+                    var filtered = allChannels.filter(function (c) {
+                        if (filter === 'orphaned' && !c.IsOrphaned) return false;
+                        if (filter === 'active' && c.IsOrphaned) return false;
+
+                        if (searchTerm) {
+                            var name = (c.Name || '').toLowerCase();
+                            var num = (c.Number || '').toLowerCase();
+                            var tuner = (c.TunerName || c.ServiceName || '').toLowerCase();
+                            if (name.indexOf(searchTerm) === -1 && num.indexOf(searchTerm) === -1 && tuner.indexOf(searchTerm) === -1) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    });
+
+                    var tbody = document.querySelector('#tblChannelsBody');
+                    if (filtered.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 2em; color: #888;">No channels found matching the filter.</td></tr>';
+                        return;
+                    }
+
+                    var html = '';
+                    filtered.forEach(function (ch) {
+                        var isChecked = selectedChannelIds.has(ch.Id) ? 'checked' : '';
+                        var statusBadge = ch.IsOrphaned
+                            ? '<span class="badge badge-orphaned">Orphaned</span>'
+                            : '<span class="badge badge-active">Active</span>';
+
+                        var tunerLabel = ch.TunerName || ch.ServiceName || (ch.IsOrphaned ? 'Deleted Tuner' : 'Unknown');
+
+                        html += '<tr data-id="' + ch.Id + '">' +
+                            '<td><input type="checkbox" class="chk-channel" data-id="' + ch.Id + '" ' + isChecked + ' /></td>' +
+                            '<td>' + (ch.Number || '-') + '</td>' +
+                            '<td><strong>' + escapeHtml(ch.Name || 'Unnamed') + '</strong></td>' +
+                            '<td>' + statusBadge + '</td>' +
+                            '<td>' + escapeHtml(tunerLabel) + '</td>' +
+                            '<td>' + (ch.ProgramCount || 0) + '</td>' +
+                            '<td style="text-align:center;">' +
+                            '<button is="emby-button" type="button" class="raised button-danger btn-mini btn-delete-single" data-id="' + ch.Id + '" data-name="' + escapeHtml(ch.Name) + '">' +
+                            '<span>Delete</span>' +
+                            '</button>' +
+                            '</td>' +
+                            '</tr>';
+                    });
+
+                    tbody.innerHTML = html;
+
+                    // Attach row events
+                    tbody.querySelectorAll('.chk-channel').forEach(function (chk) {
+                        chk.addEventListener('change', function () {
+                            var id = this.getAttribute('data-id');
+                            if (this.checked) {
+                                selectedChannelIds.add(id);
+                            } else {
+                                selectedChannelIds.delete(id);
+                            }
+                            updateBulkButton();
+                        });
+                    });
+
+                    tbody.querySelectorAll('.btn-delete-single').forEach(function (btn) {
+                        btn.addEventListener('click', function () {
+                            var id = this.getAttribute('data-id');
+                            var name = this.getAttribute('data-name');
+                            deleteSingleChannel(id, name);
+                        });
+                    });
+                }
+
+                function escapeHtml(str) {
+                    if (!str) return '';
+                    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                }
+
+                function updateBulkButton() {
+                    var btn = document.querySelector('#btnDeleteSelected');
+                    var count = selectedChannelIds.size;
+                    if (count > 0) {
+                        btn.style.display = 'inline-block';
+                        document.querySelector('#btnDeleteSelectedText').textContent = 'Delete Selected (' + count + ')';
+                    } else {
+                        btn.style.display = 'none';
+                    }
+                }
+
+                function deleteSingleChannel(id, name) {
+                    Dashboard.confirm('Are you sure you want to delete channel "' + name + '" and its guide programs?', 'Delete Channel', function (confirm) {
+                        if (confirm) {
+                            Dashboard.showLoadingMsg();
+                            makeApiRequest('Channels/' + id, 'DELETE')
+                                .then(function (result) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert(result.Message || 'Channel deleted.');
+                                    loadStatus();
+                                    loadChannels();
+                                })
+                                .catch(function (err) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert('Error deleting channel: ' + err);
+                                });
+                        }
+                    });
+                }
+
+                function cleanOrphanedChannels() {
+                    Dashboard.confirm('Scan and delete all channels that no longer match any active tuner?', 'Clean Orphaned Channels', function (confirm) {
+                        if (confirm) {
+                            Dashboard.showLoadingMsg();
+                            makeApiRequest('DeleteOrphaned', 'POST')
+                                .then(function (result) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert(result.Message || 'Orphaned channels cleaned.');
+                                    loadStatus();
+                                    loadChannels();
+                                })
+                                .catch(function (err) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert('Error cleaning orphaned channels: ' + err);
+                                });
+                        }
+                    });
+                }
+
+                function resetAllChannels() {
+                    Dashboard.confirm('DANGER: This will delete ALL Live TV channels and guide programs from the database! Are you sure you want to reset?', 'RESET ALL CHANNELS', function (confirm) {
+                        if (confirm) {
+                            Dashboard.showLoadingMsg();
+                            makeApiRequest('DeleteAllChannels', 'POST')
+                                .then(function (result) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert(result.Message || 'All channels reset.');
+                                    loadStatus();
+                                    loadChannels();
+                                })
+                                .catch(function (err) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert('Error resetting channels: ' + err);
+                                });
+                        }
+                    });
+                }
+
+                function purgeGuideData() {
+                    Dashboard.confirm('Purge all Electronic Program Guide (EPG) data without deleting channels?', 'Purge Guide Programs', function (confirm) {
+                        if (confirm) {
+                            Dashboard.showLoadingMsg();
+                            makeApiRequest('DeleteAllPrograms', 'POST')
+                                .then(function (result) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert(result.Message || 'Guide data purged.');
+                                    loadStatus();
+                                    loadChannels();
+                                })
+                                .catch(function (err) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert('Error purging guide data: ' + err);
+                                });
+                        }
+                    });
+                }
+
+                function deleteSelectedChannels() {
+                    var count = selectedChannelIds.size;
+                    if (count === 0) return;
+
+                    Dashboard.confirm('Are you sure you want to delete the ' + count + ' selected channels?', 'Delete Selected', function (confirm) {
+                        if (confirm) {
+                            Dashboard.showLoadingMsg();
+                            var ids = Array.from(selectedChannelIds);
+                            makeApiRequest('DeleteSelected', 'POST', { ChannelIds: ids })
+                                .then(function (result) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert(result.Message || 'Selected channels deleted.');
+                                    loadStatus();
+                                    loadChannels();
+                                })
+                                .catch(function (err) {
+                                    Dashboard.hideLoadingMsg();
+                                    Dashboard.alert('Error deleting selected channels: ' + err);
+                                });
+                        }
+                    });
+                }
+
+                function refreshGuide() {
+                    Dashboard.showLoadingMsg();
+                    makeApiRequest('RefreshGuide', 'POST')
+                        .then(function () {
+                            Dashboard.hideLoadingMsg();
+                            Dashboard.alert('Refresh Guide task queued on server.');
+                        })
+                        .catch(function (err) {
+                            Dashboard.hideLoadingMsg();
+                            Dashboard.alert('Error queuing guide refresh: ' + err);
+                        });
+                }
+
+                var page = document.querySelector('#LiveTvCleanerConfigPage');
+
+                page.addEventListener('pageshow', function () {
+                    loadStatus();
+                    loadChannels();
+                });
+
+                document.querySelector('#btnCleanOrphaned').addEventListener('click', cleanOrphanedChannels);
+                document.querySelector('#btnResetAll').addEventListener('click', resetAllChannels);
+                document.querySelector('#btnPurgePrograms').addEventListener('click', purgeGuideData);
+                document.querySelector('#btnRefreshGuide').addEventListener('click', refreshGuide);
+                document.querySelector('#btnReload').addEventListener('click', function () {
+                    loadStatus();
+                    loadChannels();
+                });
+
+                document.querySelector('#btnDeleteSelected').addEventListener('click', deleteSelectedChannels);
+
+                document.querySelector('#txtSearch').addEventListener('input', renderChannels);
+                document.querySelector('#selFilter').addEventListener('change', renderChannels);
+
+                document.querySelector('#chkSelectAll').addEventListener('change', function () {
+                    var checked = this.checked;
+                    document.querySelectorAll('.chk-channel').forEach(function (chk) {
+                        chk.checked = checked;
+                        var id = chk.getAttribute('data-id');
+                        if (checked) {
+                            selectedChannelIds.add(id);
+                        } else {
+                            selectedChannelIds.delete(id);
+                        }
+                    });
+                    updateBulkButton();
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>
