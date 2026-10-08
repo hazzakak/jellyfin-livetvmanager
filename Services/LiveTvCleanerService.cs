@@ -23,10 +23,12 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.LiveTvCleaner.Services;
 
 /// <summary>
-/// Service implementation for managing and cleaning Live TV channels and guide data.
+/// High-performance service for managing and cleaning Live TV channels and guide data.
 /// </summary>
 public class LiveTvCleanerService : ILiveTvCleanerService
 {
+    private const int BatchChunkSize = 250;
+
     private readonly ILibraryManager _libraryManager;
     private readonly IConfigurationManager _config;
     private readonly ILiveTvManager _liveTvManager;
@@ -146,71 +148,43 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             });
         }
 
-        _logger.LogInformation("Starting deletion of {Count} Live TV channels", channelIds.Count);
-
-        var deleteOptions = new DeleteOptions
-        {
-            DeleteFileLocation = false,
-            DeleteFromExternalProvider = false
-        };
-
-        var deletedChannels = 0;
-        var deletedPrograms = 0;
+        _logger.LogInformation("Starting high-speed batch deletion of {Count} Live TV channels", channelIds.Count);
 
         var channelIdSet = new HashSet<Guid>(channelIds);
-        var total = channelIds.Count;
-        var current = 0;
 
-        foreach (var id in channelIds)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
+        // 1. Fetch channels to delete
+        var allChannels = GetChannelsFromDb();
+        var targetChannels = allChannels.Where(c => channelIdSet.Contains(c.Id)).ToList();
 
-            var channel = _libraryManager.GetItemById(id) as LiveTvChannel;
-            if (channel is not null)
-            {
-                // Delete programs associated with this channel
-                var programs = GetProgramsForChannel(channel.Id);
-                foreach (var program in programs)
-                {
-                    try
-                    {
-                        _libraryManager.DeleteItem(program, deleteOptions, false);
-                        deletedPrograms++;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to delete program {Id} for channel {ChannelId}", program.Id, channel.Id);
-                    }
-                }
+        // 2. Fetch associated programs in a single pass
+        var allPrograms = GetAllProgramsFromDb();
+        var targetPrograms = allPrograms.Where(p => channelIdSet.Contains(p.ParentId)).ToList();
 
-                // Delete the channel itself
-                try
-                {
-                    _libraryManager.DeleteItem(channel, deleteOptions, false);
-                    deletedChannels++;
-                    _logger.LogDebug("Deleted Live TV channel {Name} ({Id})", channel.Name, channel.Id);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to delete channel {Name} ({Id})", channel.Name, channel.Id);
-                }
-            }
+        _logger.LogInformation(
+            "Found {Channels} target channels and {Programs} associated guide programs to batch-delete",
+            targetChannels.Count,
+            targetPrograms.Count);
 
-            current++;
-            progress?.Report((double)current / total * 100);
-        }
+        var totalItems = targetPrograms.Count + targetChannels.Count;
+        var processedItems = 0;
+
+        // 3. Batch delete programs using fast bulk delete
+        var deletedPrograms = BatchDeleteItems(targetPrograms, ref processedItems, totalItems, progress, cancellationToken);
+
+        // 4. Batch delete channels using fast bulk delete
+        var deletedChannels = BatchDeleteItems(targetChannels, ref processedItems, totalItems, progress, cancellationToken);
 
         UpdateConfigStats(deletedChannels, deletedPrograms);
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Successfully deleted {deletedChannels} channels and {deletedPrograms} associated guide programs.",
+            Message = $"Fast batch deletion complete: Removed {deletedChannels} channels and {deletedPrograms} guide programs.",
             DeletedChannels = deletedChannels,
             DeletedPrograms = deletedPrograms
         };
 
-        _logger.LogInformation("Channel deletion completed: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
+        _logger.LogInformation("Channel deletion completed in batch mode: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
         return Task.FromResult(result);
     }
 
@@ -251,61 +225,28 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Executing full reset of all Live TV channels and guide programs");
+        _logger.LogWarning("Executing fast bulk reset of ALL Live TV channels and guide programs");
 
         var channels = GetChannelsFromDb();
-        var channelIds = channels.Select(c => c.Id).ToList();
+        var programs = GetAllProgramsFromDb();
 
-        // Also clean any rogue programs not linked to channels
-        var allPrograms = GetAllProgramsFromDb();
-        var deleteOptions = new DeleteOptions
-        {
-            DeleteFileLocation = false,
-            DeleteFromExternalProvider = false
-        };
+        _logger.LogInformation("Purging {Programs} programs and {Channels} channels", programs.Count, channels.Count);
 
-        var deletedPrograms = 0;
-        foreach (var prog in allPrograms)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                _libraryManager.DeleteItem(prog, deleteOptions, false);
-                deletedPrograms++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete program {Id}", prog.Id);
-            }
-        }
+        var totalItems = programs.Count + channels.Count;
+        var processedItems = 0;
 
-        var deletedChannels = 0;
-        var total = channels.Count;
-        var current = 0;
+        // Delete all programs first
+        var deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
 
-        foreach (var channel in channels)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                _libraryManager.DeleteItem(channel, deleteOptions, false);
-                deletedChannels++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to delete channel {Name} ({Id})", channel.Name, channel.Id);
-            }
-
-            current++;
-            progress?.Report((double)current / (total == 0 ? 1 : total) * 100);
-        }
+        // Delete all channels second
+        var deletedChannels = BatchDeleteItems(channels, ref processedItems, totalItems, progress, cancellationToken);
 
         UpdateConfigStats(deletedChannels, deletedPrograms);
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Full Live TV Reset complete. Deleted {deletedChannels} channels and {deletedPrograms} guide programs.",
+            Message = $"Full Live TV Reset complete. Fast-deleted {deletedChannels} channels and {deletedPrograms} guide programs.",
             DeletedChannels = deletedChannels,
             DeletedPrograms = deletedPrograms
         };
@@ -319,45 +260,23 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Purging all Live TV guide programs from the database");
+        _logger.LogInformation("Purging all Live TV guide programs from the database in batch mode");
 
         var programs = GetAllProgramsFromDb();
-        var deleteOptions = new DeleteOptions
-        {
-            DeleteFileLocation = false,
-            DeleteFromExternalProvider = false
-        };
+        var totalItems = programs.Count;
+        var processedItems = 0;
 
-        var deletedCount = 0;
-        var total = programs.Count;
-        var current = 0;
-
-        foreach (var prog in programs)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                _libraryManager.DeleteItem(prog, deleteOptions, false);
-                deletedCount++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete program {Id}", prog.Id);
-            }
-
-            current++;
-            progress?.Report((double)current / (total == 0 ? 1 : total) * 100);
-        }
+        var deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
 
         var result = new DeleteResultDto
         {
             Success = true,
-            Message = $"Successfully purged {deletedCount} Live TV guide programs.",
+            Message = $"Successfully purged {deletedPrograms} Live TV guide programs in batch mode.",
             DeletedChannels = 0,
-            DeletedPrograms = deletedCount
+            DeletedPrograms = deletedPrograms
         };
 
-        _logger.LogInformation("Guide purge completed: {Count} programs deleted", deletedCount);
+        _logger.LogInformation("Guide purge completed: {Count} programs deleted", deletedPrograms);
         return Task.FromResult(result);
     }
 
@@ -381,6 +300,65 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         }
 
         return Task.CompletedTask;
+    }
+
+    private int BatchDeleteItems<T>(
+        IReadOnlyList<T> items,
+        ref int processedItems,
+        int totalItems,
+        IProgress<double>? progress,
+        CancellationToken cancellationToken) where T : BaseItem
+    {
+        if (items.Count == 0)
+        {
+            return 0;
+        }
+
+        var deleted = 0;
+        var deleteOptions = new DeleteOptions
+        {
+            DeleteFileLocation = false,
+            DeleteFromExternalProvider = false
+        };
+
+        for (var i = 0; i < items.Count; i += BatchChunkSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var chunk = items.Skip(i).Take(BatchChunkSize).ToList();
+
+            try
+            {
+                // Primary method: Fast bulk deletion in a single database transaction
+                _libraryManager.DeleteItemsUnsafeFast(chunk);
+                deleted += chunk.Count;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Fast bulk delete failed for batch of {Count} items, falling back to individual delete", chunk.Count);
+
+                // Fallback: Individual item deletion
+                foreach (var item in chunk)
+                {
+                    try
+                    {
+                        _libraryManager.DeleteItem(item, deleteOptions, false);
+                        deleted++;
+                    }
+                    catch (Exception itemEx)
+                    {
+                        _logger.LogError(itemEx, "Failed to delete item {Id} ({Type})", item.Id, item.GetType().Name);
+                    }
+                }
+            }
+
+            processedItems += chunk.Count;
+            if (totalItems > 0)
+            {
+                progress?.Report((double)processedItems / totalItems * 100);
+            }
+        }
+
+        return deleted;
     }
 
     private List<LiveTvChannel> GetChannelsFromDb()
@@ -415,19 +393,6 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         };
 
         return _libraryManager.GetCount(query);
-    }
-
-    private List<LiveTvProgram> GetProgramsForChannel(Guid channelId)
-    {
-        var query = new InternalItemsQuery
-        {
-            IncludeItemTypes = [BaseItemKind.LiveTvProgram],
-            ParentId = channelId
-        };
-
-        return _libraryManager.GetItemList(query)
-            .OfType<LiveTvProgram>()
-            .ToList();
     }
 
     private Dictionary<Guid, int> GetProgramCountsByChannel()

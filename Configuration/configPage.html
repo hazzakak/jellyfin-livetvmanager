@@ -249,6 +249,15 @@
                     </table>
                 </div>
 
+                <!-- Pagination Bar -->
+                <div class="pagination-bar" style="display:flex; justify-content:space-between; align-items:center; margin-top:0.8em;">
+                    <div id="lblPageInfo" style="color:#aaa; font-size:0.9em;">Showing 0-0 of 0 channels</div>
+                    <div style="display:flex; gap:0.5em;">
+                        <button is="emby-button" type="button" id="btnPrevPage" class="raised emby-button btn-mini" disabled><span>&laquo; Previous</span></button>
+                        <button is="emby-button" type="button" id="btnNextPage" class="raised emby-button btn-mini" disabled><span>Next &raquo;</span></button>
+                    </div>
+                </div>
+
             </div>
         </div>
 
@@ -319,6 +328,9 @@
                         });
                 }
 
+                var currentPage = 1;
+                var pageSize = 100;
+
                 function renderChannels() {
                     var searchTerm = (document.querySelector('#txtSearch').value || '').trim().toLowerCase();
                     var filter = document.querySelector('#selFilter').value;
@@ -338,14 +350,37 @@
                         return true;
                     });
 
+                    var totalFiltered = filtered.length;
+                    var totalPages = Math.ceil(totalFiltered / pageSize) || 1;
+                    if (currentPage > totalPages) currentPage = totalPages;
+                    if (currentPage < 1) currentPage = 1;
+
+                    var startIdx = (currentPage - 1) * pageSize;
+                    var endIdx = Math.min(startIdx + pageSize, totalFiltered);
+                    var pageItems = filtered.slice(startIdx, endIdx);
+
+                    var lblInfo = document.querySelector('#lblPageInfo');
+                    var btnPrev = document.querySelector('#btnPrevPage');
+                    var btnNext = document.querySelector('#btnNextPage');
+
+                    if (totalFiltered === 0) {
+                        lblInfo.textContent = 'Showing 0 channels';
+                        btnPrev.disabled = true;
+                        btnNext.disabled = true;
+                    } else {
+                        lblInfo.textContent = 'Showing ' + (startIdx + 1) + '-' + endIdx + ' of ' + totalFiltered + ' channels (Page ' + currentPage + ' of ' + totalPages + ')';
+                        btnPrev.disabled = (currentPage <= 1);
+                        btnNext.disabled = (currentPage >= totalPages);
+                    }
+
                     var tbody = document.querySelector('#tblChannelsBody');
-                    if (filtered.length === 0) {
+                    if (pageItems.length === 0) {
                         tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 2em; color: #888;">No channels found matching the filter.</td></tr>';
                         return;
                     }
 
                     var html = '';
-                    filtered.forEach(function (ch) {
+                    pageItems.forEach(function (ch) {
                         var isChecked = selectedChannelIds.has(ch.Id) ? 'checked' : '';
                         var statusBadge = ch.IsOrphaned
                             ? '<span class="badge badge-orphaned">Orphaned</span>'
@@ -538,8 +573,25 @@
 
                 document.querySelector('#btnDeleteSelected').addEventListener('click', deleteSelectedChannels);
 
-                document.querySelector('#txtSearch').addEventListener('input', renderChannels);
-                document.querySelector('#selFilter').addEventListener('change', renderChannels);
+                document.querySelector('#btnPrevPage').addEventListener('click', function () {
+                    if (currentPage > 1) {
+                        currentPage--;
+                        renderChannels();
+                    }
+                });
+                document.querySelector('#btnNextPage').addEventListener('click', function () {
+                    currentPage++;
+                    renderChannels();
+                });
+
+                document.querySelector('#txtSearch').addEventListener('input', function () {
+                    currentPage = 1;
+                    renderChannels();
+                });
+                document.querySelector('#selFilter').addEventListener('change', function () {
+                    currentPage = 1;
+                    renderChannels();
+                });
 
                 document.querySelector('#chkSelectAll').addEventListener('change', function () {
                     var checked = this.checked;
