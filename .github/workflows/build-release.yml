@@ -103,4 +103,5 @@ jobs:
             git commit -m "chore(release): update manifest.json for ${{ github.ref_name }}"
             git pull --rebase origin main
             git push origin main
+            curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/manifest.json" || true
           fi
