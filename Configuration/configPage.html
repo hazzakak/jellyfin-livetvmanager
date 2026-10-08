@@ -77,6 +77,88 @@
             .button-accent:hover {
                 background-color: #0084b0 !important;
             }
+
+            /* Real-Time Operation Progress Card */
+            .operation-card {
+                background: rgba(33, 150, 243, 0.12);
+                border: 1px solid rgba(33, 150, 243, 0.35);
+                border-radius: 8px;
+                padding: 1.2em 1.5em;
+                margin-bottom: 1.5em;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+                transition: all 0.3s ease;
+            }
+            .operation-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 0.9em;
+                flex-wrap: wrap;
+                gap: 0.8em;
+            }
+            .operation-title-group {
+                display: flex;
+                align-items: center;
+                gap: 0.9em;
+            }
+            .operation-spinner {
+                width: 22px;
+                height: 22px;
+                border: 3px solid rgba(255, 255, 255, 0.2);
+                border-top-color: #00a4dc;
+                border-radius: 50%;
+                animation: spin-cleaner 0.8s linear infinite;
+                flex-shrink: 0;
+            }
+            @keyframes spin-cleaner {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            .operation-title {
+                font-size: 1.1em;
+                font-weight: 700;
+                color: #fff;
+                margin-bottom: 0.2em;
+            }
+            .operation-subtitle {
+                font-size: 0.85em;
+                color: #ccc;
+                max-width: 650px;
+                word-break: break-word;
+            }
+            .progress-bar-container {
+                width: 100%;
+                height: 12px;
+                background: rgba(0, 0, 0, 0.45);
+                border-radius: 6px;
+                overflow: hidden;
+                margin-bottom: 0.5em;
+                border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            .progress-bar-fill {
+                height: 100%;
+                background: linear-gradient(90deg, #00a4dc, #69f0ae);
+                width: 0%;
+                transition: width 0.3s ease;
+                border-radius: 6px;
+            }
+            .progress-meta {
+                display: flex;
+                justify-content: space-between;
+                font-size: 0.85em;
+                color: #aaa;
+                font-weight: 600;
+            }
+            .btn-stop {
+                background-color: #d32f2f !important;
+                color: #fff !important;
+                font-weight: 700;
+                padding: 0.4em 1.2em !important;
+            }
+            .btn-stop:hover {
+                background-color: #b71c1c !important;
+            }
+
             .table-container {
                 overflow-x: auto;
                 background: rgba(0,0,0,0.2);
@@ -187,6 +269,31 @@
                     </div>
                 </div>
 
+                <!-- Real-Time Operation Status Bar -->
+                <div id="operationStatusContainer" class="operation-card" style="display: none;">
+                    <div class="operation-header">
+                        <div class="operation-title-group">
+                            <div class="operation-spinner" id="operationSpinner"></div>
+                            <div>
+                                <div class="operation-title" id="operationTitle">Operation in progress</div>
+                                <div class="operation-subtitle" id="operationSubtitle">Processing items...</div>
+                            </div>
+                        </div>
+                        <div>
+                            <button is="emby-button" type="button" id="btnStopOperation" class="raised button-danger btn-stop emby-button">
+                                <span>&#9632; Stop</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div id="progressBarFill" class="progress-bar-fill" style="width: 0%;"></div>
+                    </div>
+                    <div class="progress-meta">
+                        <span id="progressItems">0 items</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                </div>
+
                 <!-- Action Buttons -->
                 <div class="actions-bar">
                     <button is="emby-button" type="button" id="btnCleanOrphaned" class="raised button-accent emby-button">
@@ -266,6 +373,8 @@
                 var pluginId = 'a5d6f3e1-8842-4217-bf41-4824e86dbdf9';
                 var allChannels = [];
                 var selectedChannelIds = new Set();
+                var pollIntervalId = null;
+                var hideTimeoutId = null;
 
                 function getApiUrl(path) {
                     return ApiClient.getUrl('LiveTvCleaner/' + path);
@@ -286,8 +395,151 @@
                     return ApiClient.ajax(options);
                 }
 
+                function setButtonsDisabled(disabled) {
+                    var ids = ['#btnCleanOrphaned', '#btnResetAll', '#btnPurgePrograms', '#btnRefreshGuide', '#btnReload', '#btnDeleteSelected'];
+                    ids.forEach(function (sel) {
+                        var el = document.querySelector(sel);
+                        if (el) el.disabled = disabled;
+                    });
+
+                    document.querySelectorAll('.btn-delete-single').forEach(function (btn) {
+                        btn.disabled = disabled;
+                    });
+                }
+
+                function showStatusBar(title, subtitle) {
+                    if (hideTimeoutId) {
+                        clearTimeout(hideTimeoutId);
+                        hideTimeoutId = null;
+                    }
+
+                    var container = document.querySelector('#operationStatusContainer');
+                    container.style.display = 'block';
+
+                    var spinner = document.querySelector('#operationSpinner');
+                    if (spinner) spinner.style.display = 'block';
+
+                    if (title) document.querySelector('#operationTitle').textContent = title;
+                    if (subtitle) document.querySelector('#operationSubtitle').textContent = subtitle;
+
+                    var btnStop = document.querySelector('#btnStopOperation');
+                    btnStop.disabled = false;
+                    btnStop.style.display = 'inline-block';
+                    btnStop.querySelector('span').textContent = '\u25A0 Stop';
+                }
+
+                function hideStatusBar() {
+                    var container = document.querySelector('#operationStatusContainer');
+                    container.style.display = 'none';
+                }
+
+                function startProgressPolling(initialTitle) {
+                    showStatusBar(initialTitle || 'Operation in Progress', 'Starting operation...');
+                    setButtonsDisabled(true);
+
+                    if (pollIntervalId) {
+                        clearInterval(pollIntervalId);
+                    }
+
+                    pollIntervalId = setInterval(checkProgress, 500);
+                    checkProgress();
+                }
+
+                function stopProgressPolling() {
+                    if (pollIntervalId) {
+                        clearInterval(pollIntervalId);
+                        pollIntervalId = null;
+                    }
+                    setButtonsDisabled(false);
+                }
+
+                function checkProgress() {
+                    makeApiRequest('Progress', 'GET')
+                        .then(function (progress) {
+                            updateProgressUi(progress);
+                        })
+                        .catch(function (err) {
+                            console.error('Error fetching operation progress', err);
+                        });
+                }
+
+                function updateProgressUi(progress) {
+                    if (!progress) return;
+
+                    var container = document.querySelector('#operationStatusContainer');
+                    var spinner = document.querySelector('#operationSpinner');
+                    var btnStop = document.querySelector('#btnStopOperation');
+
+                    if (progress.IsRunning) {
+                        container.style.display = 'block';
+                        if (spinner) spinner.style.display = 'block';
+                        setButtonsDisabled(true);
+
+                        document.querySelector('#operationTitle').textContent = progress.OperationName || 'Operation in Progress';
+                        document.querySelector('#operationSubtitle').textContent = progress.Message || 'Processing...';
+
+                        var pct = Math.max(0, Math.min(100, progress.Percent));
+                        document.querySelector('#progressBarFill').style.width = Math.max(pct, 2) + '%';
+                        document.querySelector('#progressPercent').textContent = pct + '%';
+
+                        if (progress.TotalItems > 0) {
+                            document.querySelector('#progressItems').textContent =
+                                (progress.ProcessedItems || 0).toLocaleString() + ' / ' + progress.TotalItems.toLocaleString() + ' items';
+                        } else {
+                            document.querySelector('#progressItems').textContent = (progress.ProcessedItems || 0).toLocaleString() + ' items';
+                        }
+
+                        if (progress.CancellationRequested) {
+                            btnStop.disabled = true;
+                            btnStop.querySelector('span').textContent = 'Stopping...';
+                        } else {
+                            btnStop.disabled = !progress.CanStop;
+                            btnStop.querySelector('span').textContent = '\u25A0 Stop';
+                        }
+                    } else {
+                        // Operation is not running
+                        if (pollIntervalId) {
+                            clearInterval(pollIntervalId);
+                            pollIntervalId = null;
+                            setButtonsDisabled(false);
+
+                            if (spinner) spinner.style.display = 'none';
+                            btnStop.style.display = 'none';
+
+                            if (progress.Percent === 100) {
+                                document.querySelector('#progressBarFill').style.width = '100%';
+                                document.querySelector('#progressPercent').textContent = '100%';
+                            }
+
+                            document.querySelector('#operationSubtitle').textContent = progress.Message || 'Complete.';
+
+                            // Keep status card visible for 4 seconds then auto-hide
+                            hideTimeoutId = setTimeout(function () {
+                                if (!pollIntervalId) {
+                                    hideStatusBar();
+                                }
+                            }, 4000);
+                        }
+                    }
+                }
+
+                function stopCurrentOperation() {
+                    var btnStop = document.querySelector('#btnStopOperation');
+                    btnStop.disabled = true;
+                    btnStop.querySelector('span').textContent = 'Stopping...';
+                    document.querySelector('#operationSubtitle').textContent = 'Requesting cancellation from server...';
+
+                    makeApiRequest('Stop', 'POST')
+                        .then(function (res) {
+                            console.log('Stop request acknowledged:', res);
+                        })
+                        .catch(function (err) {
+                            console.error('Failed to stop operation', err);
+                            Dashboard.alert('Error requesting stop: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                        });
+                }
+
                 function loadStatus() {
-                    Dashboard.showLoadingMsg();
                     makeApiRequest('Status', 'GET')
                         .then(function (status) {
                             document.querySelector('#statTotalChannels').textContent = (status.TotalChannels || 0).toLocaleString();
@@ -302,26 +554,21 @@
                             } else {
                                 document.querySelector('#statLastClean').textContent = 'Never';
                             }
-                            Dashboard.hideLoadingMsg();
                         })
                         .catch(function (err) {
-                            Dashboard.hideLoadingMsg();
                             console.error('Failed to load status', err);
                         });
                 }
 
                 function loadChannels() {
-                    Dashboard.showLoadingMsg();
                     makeApiRequest('Channels', 'GET')
                         .then(function (channels) {
                             allChannels = channels || [];
                             selectedChannelIds.clear();
                             updateBulkButton();
                             renderChannels();
-                            Dashboard.hideLoadingMsg();
                         })
                         .catch(function (err) {
-                            Dashboard.hideLoadingMsg();
                             console.error('Failed to load channels', err);
                             document.querySelector('#tblChannelsBody').innerHTML =
                                 '<tr><td colspan="7" style="text-align:center; color:#ff5252; padding:2em;">Failed to load channels.</td></tr>';
@@ -379,6 +626,7 @@
                         return;
                     }
 
+                    var isOpRunning = (pollIntervalId !== null);
                     var html = '';
                     pageItems.forEach(function (ch) {
                         var isChecked = selectedChannelIds.has(ch.Id) ? 'checked' : '';
@@ -396,7 +644,7 @@
                             '<td>' + escapeHtml(tunerLabel) + '</td>' +
                             '<td>' + (ch.ProgramCount || 0) + '</td>' +
                             '<td style="text-align:center;">' +
-                            '<button is="emby-button" type="button" class="raised button-danger btn-mini btn-delete-single" data-id="' + ch.Id + '" data-name="' + escapeHtml(ch.Name) + '">' +
+                            '<button is="emby-button" type="button" class="raised button-danger btn-mini btn-delete-single" data-id="' + ch.Id + '" data-name="' + escapeHtml(ch.Name) + '"' + (isOpRunning ? ' disabled' : '') + '>' +
                             '<span>Delete</span>' +
                             '</button>' +
                             '</td>' +
@@ -446,17 +694,19 @@
                 function deleteSingleChannel(id, name) {
                     Dashboard.confirm('Are you sure you want to delete channel "' + name + '" and its guide programs?', 'Delete Channel', function (confirm) {
                         if (confirm) {
-                            Dashboard.showLoadingMsg();
+                            startProgressPolling('Deleting Channel: ' + name);
                             makeApiRequest('Channels/' + id, 'DELETE')
                                 .then(function (result) {
-                                    Dashboard.hideLoadingMsg();
+                                    stopProgressPolling();
                                     Dashboard.alert(result.Message || 'Channel deleted.');
                                     loadStatus();
                                     loadChannels();
                                 })
                                 .catch(function (err) {
-                                    Dashboard.hideLoadingMsg();
-                                    Dashboard.alert('Error deleting channel: ' + err);
+                                    stopProgressPolling();
+                                    Dashboard.alert('Error deleting channel: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                                    loadStatus();
+                                    loadChannels();
                                 });
                         }
                     });
@@ -465,17 +715,19 @@
                 function cleanOrphanedChannels() {
                     Dashboard.confirm('Scan and delete all channels that no longer match any active tuner?', 'Clean Orphaned Channels', function (confirm) {
                         if (confirm) {
-                            Dashboard.showLoadingMsg();
+                            startProgressPolling('Cleaning Orphaned Channels');
                             makeApiRequest('DeleteOrphaned', 'POST')
                                 .then(function (result) {
-                                    Dashboard.hideLoadingMsg();
+                                    stopProgressPolling();
                                     Dashboard.alert(result.Message || 'Orphaned channels cleaned.');
                                     loadStatus();
                                     loadChannels();
                                 })
                                 .catch(function (err) {
-                                    Dashboard.hideLoadingMsg();
-                                    Dashboard.alert('Error cleaning orphaned channels: ' + err);
+                                    stopProgressPolling();
+                                    Dashboard.alert('Error cleaning orphaned channels: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                                    loadStatus();
+                                    loadChannels();
                                 });
                         }
                     });
@@ -484,17 +736,19 @@
                 function resetAllChannels() {
                     Dashboard.confirm('DANGER: This will delete ALL Live TV channels and guide programs from the database! Are you sure you want to reset?', 'RESET ALL CHANNELS', function (confirm) {
                         if (confirm) {
-                            Dashboard.showLoadingMsg();
+                            startProgressPolling('Resetting All Channels');
                             makeApiRequest('DeleteAllChannels', 'POST')
                                 .then(function (result) {
-                                    Dashboard.hideLoadingMsg();
+                                    stopProgressPolling();
                                     Dashboard.alert(result.Message || 'All channels reset.');
                                     loadStatus();
                                     loadChannels();
                                 })
                                 .catch(function (err) {
-                                    Dashboard.hideLoadingMsg();
-                                    Dashboard.alert('Error resetting channels: ' + err);
+                                    stopProgressPolling();
+                                    Dashboard.alert('Error resetting channels: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                                    loadStatus();
+                                    loadChannels();
                                 });
                         }
                     });
@@ -503,17 +757,19 @@
                 function purgeGuideData() {
                     Dashboard.confirm('Purge all Electronic Program Guide (EPG) data without deleting channels?', 'Purge Guide Programs', function (confirm) {
                         if (confirm) {
-                            Dashboard.showLoadingMsg();
+                            startProgressPolling('Purging Guide Programs');
                             makeApiRequest('DeleteAllPrograms', 'POST')
                                 .then(function (result) {
-                                    Dashboard.hideLoadingMsg();
+                                    stopProgressPolling();
                                     Dashboard.alert(result.Message || 'Guide data purged.');
                                     loadStatus();
                                     loadChannels();
                                 })
                                 .catch(function (err) {
-                                    Dashboard.hideLoadingMsg();
-                                    Dashboard.alert('Error purging guide data: ' + err);
+                                    stopProgressPolling();
+                                    Dashboard.alert('Error purging guide data: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                                    loadStatus();
+                                    loadChannels();
                                 });
                         }
                     });
@@ -525,32 +781,31 @@
 
                     Dashboard.confirm('Are you sure you want to delete the ' + count + ' selected channels?', 'Delete Selected', function (confirm) {
                         if (confirm) {
-                            Dashboard.showLoadingMsg();
+                            startProgressPolling('Deleting Selected Channels');
                             var ids = Array.from(selectedChannelIds);
                             makeApiRequest('DeleteSelected', 'POST', { ChannelIds: ids })
                                 .then(function (result) {
-                                    Dashboard.hideLoadingMsg();
+                                    stopProgressPolling();
                                     Dashboard.alert(result.Message || 'Selected channels deleted.');
                                     loadStatus();
                                     loadChannels();
                                 })
                                 .catch(function (err) {
-                                    Dashboard.hideLoadingMsg();
-                                    Dashboard.alert('Error deleting selected channels: ' + err);
+                                    stopProgressPolling();
+                                    Dashboard.alert('Error deleting selected channels: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                                    loadStatus();
+                                    loadChannels();
                                 });
                         }
                     });
                 }
 
                 function refreshGuide() {
-                    Dashboard.showLoadingMsg();
                     makeApiRequest('RefreshGuide', 'POST')
                         .then(function () {
-                            Dashboard.hideLoadingMsg();
                             Dashboard.alert('Refresh Guide task queued on server.');
                         })
                         .catch(function (err) {
-                            Dashboard.hideLoadingMsg();
                             Dashboard.alert('Error queuing guide refresh: ' + err);
                         });
                 }
@@ -563,25 +818,33 @@
                     initialLoadDone = true;
                     loadStatus();
                     loadChannels();
+
+                    // Check if an operation is already active on the server
+                    makeApiRequest('Progress', 'GET')
+                        .then(function (progress) {
+                            if (progress && progress.IsRunning) {
+                                startProgressPolling(progress.OperationName);
+                            }
+                        })
+                        .catch(function () {});
                 }
 
                 page.addEventListener('pageshow', function () {
-                    loadStatus();
-                    loadChannels();
+                    initPage();
                 });
 
                 page.addEventListener('viewshow', function () {
-                    loadStatus();
-                    loadChannels();
+                    initPage();
                 });
 
-                // Fallback in case events do not fire on direct link navigation
+                // Direct link navigation fallback
                 setTimeout(function () {
-                    if (!initialLoadDone && allChannels.length === 0) {
+                    if (!initialLoadDone) {
                         initPage();
                     }
                 }, 300);
 
+                document.querySelector('#btnStopOperation').addEventListener('click', stopCurrentOperation);
                 document.querySelector('#btnCleanOrphaned').addEventListener('click', cleanOrphanedChannels);
                 document.querySelector('#btnResetAll').addEventListener('click', resetAllChannels);
                 document.querySelector('#btnPurgePrograms').addEventListener('click', purgeGuideData);

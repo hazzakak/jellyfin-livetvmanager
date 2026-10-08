@@ -25,7 +25,8 @@ A specialized Jellyfin plugin designed to solve the persistent issue where delet
   - **🧹 Clean Orphaned Channels**: Automatically detects channels that no longer match any active tuner and safely removes them and their associated programs.
   - **⚠️ Reset All Live TV Channels**: Completely purges all Live TV channels and guide programs from the database to give you a clean slate for re-importing.
   - **📅 Purge Guide Data Only**: Wipes stale EPG guide programs without touching channels.
-  - **Channels Table & Single/Bulk Delete**: Browse all channels with status badges (`Orphaned` vs `Active`), filter by status or search by name/number, and delete individual or selected channels directly.
+  - **📊 Real-Time Status Bar & Progress Tracking**: Shows live progress percentage, processed item counters (e.g. `1,250 / 2,454 items`), and status messages during channel and guide data cleanup.
+  - **⏹ Stop Operation Button**: Allows administrators to immediately halt/cancel any operation in progress.
   - **🔄 Refresh Guide & Tuners**: Trigger an immediate guide and tuner rescan directly from the dashboard.
 - **Scheduled Tasks**:
   - **Clean Orphaned Live TV Channels**: Runnable manually or scheduled (e.g., daily) from **Dashboard → Scheduled Tasks**.

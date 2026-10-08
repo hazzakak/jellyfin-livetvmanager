@@ -67,6 +67,31 @@ public class LiveTvCleanerController : ControllerBase
     }
 
     /// <summary>
+    /// Gets the real-time progress of any running cleanup operation.
+    /// </summary>
+    /// <returns>Operation progress DTO.</returns>
+    [HttpGet("Progress")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<OperationProgressDto> GetProgress()
+    {
+        var progress = _cleanerService.GetProgress();
+        return Ok(progress);
+    }
+
+    /// <summary>
+    /// Cancels any currently running cleanup operation.
+    /// </summary>
+    /// <returns>Status indicating whether cancellation was signaled.</returns>
+    [HttpPost("Stop")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<object> StopOperation()
+    {
+        _logger.LogInformation("Admin requested cancellation of active operation");
+        var stopped = _cleanerService.CancelCurrentOperation();
+        return Ok(new { Success = stopped, Message = stopped ? "Cancellation requested." : "No active operation to stop." });
+    }
+
+    /// <summary>
     /// Gets all Live TV channels with their orphan status.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -87,13 +112,21 @@ public class LiveTvCleanerController : ControllerBase
     /// <returns>Delete result.</returns>
     [HttpDelete("Channels/{id}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<DeleteResultDto>> DeleteChannel(
         [FromRoute] Guid id,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Admin requested deletion of channel {Id}", id);
-        var result = await _cleanerService.DeleteChannelAsync(id, cancellationToken).ConfigureAwait(false);
-        return Ok(result);
+        try
+        {
+            _logger.LogInformation("Admin requested deletion of channel {Id}", id);
+            var result = await _cleanerService.DeleteChannelAsync(id, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
     }
 
     /// <summary>
@@ -104,13 +137,21 @@ public class LiveTvCleanerController : ControllerBase
     /// <returns>Delete result.</returns>
     [HttpPost("DeleteSelected")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<DeleteResultDto>> DeleteSelected(
         [FromBody] BulkDeleteRequest request,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Admin requested bulk deletion of {Count} channels", request.ChannelIds.Count);
-        var result = await _cleanerService.DeleteChannelsAsync(request.ChannelIds, null, cancellationToken).ConfigureAwait(false);
-        return Ok(result);
+        try
+        {
+            _logger.LogInformation("Admin requested bulk deletion of {Count} channels", request.ChannelIds.Count);
+            var result = await _cleanerService.DeleteChannelsAsync(request.ChannelIds, null, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
     }
 
     /// <summary>
@@ -120,11 +161,19 @@ public class LiveTvCleanerController : ControllerBase
     /// <returns>Delete result.</returns>
     [HttpPost("DeleteOrphaned")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<DeleteResultDto>> DeleteOrphaned(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Admin requested deletion of all orphaned Live TV channels");
-        var result = await _cleanerService.DeleteOrphanedChannelsAsync(null, cancellationToken).ConfigureAwait(false);
-        return Ok(result);
+        try
+        {
+            _logger.LogInformation("Admin requested deletion of all orphaned Live TV channels");
+            var result = await _cleanerService.DeleteOrphanedChannelsAsync(null, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
     }
 
     /// <summary>
@@ -134,11 +183,19 @@ public class LiveTvCleanerController : ControllerBase
     /// <returns>Delete result.</returns>
     [HttpPost("DeleteAllChannels")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<DeleteResultDto>> DeleteAllChannels(CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Admin requested FULL RESET of all Live TV channels and guide programs");
-        var result = await _cleanerService.ResetAllChannelsAsync(null, cancellationToken).ConfigureAwait(false);
-        return Ok(result);
+        try
+        {
+            _logger.LogWarning("Admin requested FULL RESET of all Live TV channels and guide programs");
+            var result = await _cleanerService.ResetAllChannelsAsync(null, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
     }
 
     /// <summary>
@@ -148,11 +205,19 @@ public class LiveTvCleanerController : ControllerBase
     /// <returns>Delete result.</returns>
     [HttpPost("DeleteAllPrograms")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<DeleteResultDto>> DeleteAllPrograms(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Admin requested purge of all Live TV guide programs");
-        var result = await _cleanerService.ClearAllProgramsAsync(null, cancellationToken).ConfigureAwait(false);
-        return Ok(result);
+        try
+        {
+            _logger.LogInformation("Admin requested purge of all Live TV guide programs");
+            var result = await _cleanerService.ClearAllProgramsAsync(null, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
     }
 
     /// <summary>

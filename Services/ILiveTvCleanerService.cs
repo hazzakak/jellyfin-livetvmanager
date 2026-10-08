@@ -72,4 +72,16 @@ public interface ILiveTvCleanerService
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A completed task.</returns>
     Task RefreshGuideAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets the current operation progress details.
+    /// </summary>
+    /// <returns>Current operation progress.</returns>
+    OperationProgressDto GetProgress();
+
+    /// <summary>
+    /// Requests cancellation of the currently executing operation.
+    /// </summary>
+    /// <returns>True if an operation was active and cancellation requested; otherwise false.</returns>
+    bool CancelCurrentOperation();
 }

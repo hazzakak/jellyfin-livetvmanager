@@ -31,6 +31,9 @@ public class LiveTvCleanerService : ILiveTvCleanerService
     private const int BatchChunkSize = 250;
 
     private static readonly MethodInfo? FastDeleteMethod = FindFastDeleteMethod();
+    private static readonly object SyncLock = new();
+    private static CancellationTokenSource? _activeCts;
+    private static OperationProgressDto _currentProgress = new() { IsRunning = false, Message = "Idle" };
 
     private readonly ILibraryManager _libraryManager;
     private readonly IConfigurationManager _config;
@@ -58,6 +61,43 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         _liveTvManager = liveTvManager;
         _taskManager = taskManager;
         _logger = logger;
+    }
+
+    /// <inheritdoc />
+    public OperationProgressDto GetProgress()
+    {
+        lock (SyncLock)
+        {
+            return new OperationProgressDto
+            {
+                IsRunning = _currentProgress.IsRunning,
+                OperationName = _currentProgress.OperationName,
+                ProcessedItems = _currentProgress.ProcessedItems,
+                TotalItems = _currentProgress.TotalItems,
+                Percent = _currentProgress.Percent,
+                Message = _currentProgress.Message,
+                CancellationRequested = _currentProgress.CancellationRequested,
+                CanStop = _currentProgress.CanStop
+            };
+        }
+    }
+
+    /// <inheritdoc />
+    public bool CancelCurrentOperation()
+    {
+        lock (SyncLock)
+        {
+            if (_activeCts is not null && !_activeCts.IsCancellationRequested)
+            {
+                _logger.LogInformation("Cancellation requested for active operation: {Name}", _currentProgress.OperationName);
+                _activeCts.Cancel();
+                _currentProgress.CancellationRequested = true;
+                _currentProgress.Message = "Cancellation requested. Stopping...";
+                return true;
+            }
+
+            return false;
+        }
     }
 
     /// <inheritdoc />
@@ -135,88 +175,35 @@ public class LiveTvCleanerService : ILiveTvCleanerService
     }
 
     /// <inheritdoc />
-    public Task<DeleteResultDto> DeleteChannelsAsync(
+    public async Task<DeleteResultDto> DeleteChannelsAsync(
         IReadOnlyCollection<Guid> channelIds,
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        if (channelIds.Count == 0)
+        var opName = $"Deleting {channelIds.Count} Channel{(channelIds.Count == 1 ? string.Empty : "s")}";
+        var token = BeginOperation(opName, channelIds.Count, cancellationToken);
+        try
         {
-            return Task.FromResult(new DeleteResultDto
+            return await DeleteChannelsInternalAsync(channelIds, progress, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Channel deletion stopped by user");
+            EndOperation("Channel deletion was stopped by user.");
+            return new DeleteResultDto
             {
-                Success = true,
-                Message = "No channels specified for deletion.",
+                Success = false,
+                Message = "Channel deletion was stopped by user.",
                 DeletedChannels = 0,
                 DeletedPrograms = 0
-            });
+            };
         }
-
-        _logger.LogInformation("Starting high-speed batch deletion of {Count} Live TV channels", channelIds.Count);
-
-        var channelIdSet = new HashSet<Guid>(channelIds);
-
-        // 1. Fetch channels to delete
-        var allChannels = GetChannelsFromDb();
-        var targetChannels = allChannels.Where(c => channelIdSet.Contains(c.Id)).ToList();
-
-        // 2. Fetch associated programs in a single pass
-        var allPrograms = GetAllProgramsFromDb();
-        var targetPrograms = allPrograms.Where(p => channelIdSet.Contains(p.ParentId)).ToList();
-
-        _logger.LogInformation(
-            "Found {Channels} target channels and {Programs} associated guide programs to delete",
-            targetChannels.Count,
-            targetPrograms.Count);
-
-        var totalItems = targetPrograms.Count + targetChannels.Count;
-        var processedItems = 0;
-
-        // Step 1: Delete channels FIRST so they immediately disappear from the UI
-        var deletedChannels = BatchDeleteItems(targetChannels, ref processedItems, totalItems, progress, cancellationToken);
-        _logger.LogInformation("Deleted {Channels} Live TV channels", deletedChannels);
-
-        // Step 2: Delete associated guide programs
-        int deletedPrograms = 0;
-        if (targetPrograms.Count > 0)
+        catch (Exception ex)
         {
-            if (FastDeleteMethod is not null || targetPrograms.Count <= 2000)
-            {
-                deletedPrograms = BatchDeleteItems(targetPrograms, ref processedItems, totalItems, progress, cancellationToken);
-            }
-            else
-            {
-                // On Jellyfin 10.10.x without fast batch delete:
-                // Delete programs in background so the HTTP response finishes quickly without timing out
-                _ = Task.Run(() =>
-                {
-                    try
-                    {
-                        var bgProcessed = 0;
-                        var bgDeleted = BatchDeleteItems(targetPrograms, ref bgProcessed, targetPrograms.Count, null, CancellationToken.None);
-                        _logger.LogInformation("Background guide cleanup finished: {Count} programs deleted", bgDeleted);
-                    }
-                    catch (Exception bgEx)
-                    {
-                        _logger.LogWarning(bgEx, "Background guide cleanup error");
-                    }
-                });
-                _logger.LogInformation("Queued background cleanup for {Count} guide programs to prevent HTTP timeout", targetPrograms.Count);
-                deletedPrograms = targetPrograms.Count;
-            }
+            _logger.LogError(ex, "Error while deleting channels");
+            EndOperation($"Error: {ex.Message}");
+            throw;
         }
-
-        UpdateConfigStats(deletedChannels, deletedPrograms);
-
-        var result = new DeleteResultDto
-        {
-            Success = true,
-            Message = $"Deletion complete: Removed {deletedChannels} channels and cleaned {deletedPrograms} guide programs.",
-            DeletedChannels = deletedChannels,
-            DeletedPrograms = deletedPrograms
-        };
-
-        _logger.LogInformation("Channel deletion completed: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
-        return Task.FromResult(result);
     }
 
     /// <inheritdoc />
@@ -225,30 +212,55 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         CancellationToken cancellationToken)
     {
         _logger.LogInformation("Scanning for orphaned Live TV channels to delete");
-
-        var channels = GetChannelsFromDb();
-        var tuners = GetConfiguredTuners();
-        var orphanStatus = DetermineOrphanStatus(channels, tuners, cancellationToken);
-
-        var orphanedIds = orphanStatus
-            .Where(kv => kv.Value.IsOrphaned)
-            .Select(kv => kv.Key)
-            .ToList();
-
-        _logger.LogInformation("Identified {Count} orphaned Live TV channels", orphanedIds.Count);
-
-        if (orphanedIds.Count == 0)
+        var token = BeginOperation("Cleaning Orphaned Channels", 0, cancellationToken);
+        try
         {
+            UpdateProgress(0, 0, "Scanning for orphaned Live TV channels...");
+            token.ThrowIfCancellationRequested();
+
+            var channels = GetChannelsFromDb();
+            var tuners = GetConfiguredTuners();
+            var orphanStatus = DetermineOrphanStatus(channels, tuners, token);
+
+            var orphanedIds = orphanStatus
+                .Where(kv => kv.Value.IsOrphaned)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            _logger.LogInformation("Identified {Count} orphaned Live TV channels", orphanedIds.Count);
+
+            if (orphanedIds.Count == 0)
+            {
+                EndOperation("No orphaned channels found.");
+                return new DeleteResultDto
+                {
+                    Success = true,
+                    Message = "No orphaned channels were found. Your Live TV channel database is in sync with configured tuners.",
+                    DeletedChannels = 0,
+                    DeletedPrograms = 0
+                };
+            }
+
+            return await DeleteChannelsInternalAsync(orphanedIds, progress, token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Cleaning orphaned channels stopped by user");
+            EndOperation("Cleaning orphaned channels was stopped by user.");
             return new DeleteResultDto
             {
-                Success = true,
-                Message = "No orphaned channels were found. Your Live TV channel database is in sync with configured tuners.",
+                Success = false,
+                Message = "Cleaning orphaned channels was stopped by user.",
                 DeletedChannels = 0,
                 DeletedPrograms = 0
             };
         }
-
-        return await DeleteChannelsAsync(orphanedIds, progress, cancellationToken).ConfigureAwait(false);
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while cleaning orphaned channels");
+            EndOperation($"Error: {ex.Message}");
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -256,59 +268,104 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogWarning("Executing reset of ALL Live TV channels and guide programs");
-
-        var channels = GetChannelsFromDb();
-        var programs = GetAllProgramsFromDb();
-
-        _logger.LogInformation("Purging {Channels} channels and {Programs} programs", channels.Count, programs.Count);
-
-        var totalItems = programs.Count + channels.Count;
-        var processedItems = 0;
-
-        // Delete all channels first
-        var deletedChannels = BatchDeleteItems(channels, ref processedItems, totalItems, progress, cancellationToken);
-
-        // Delete all programs
-        int deletedPrograms = 0;
-        if (programs.Count > 0)
+        var token = BeginOperation("Resetting All Live TV Channels", 0, cancellationToken);
+        try
         {
-            if (FastDeleteMethod is not null || programs.Count <= 2000)
+            _logger.LogWarning("Executing reset of ALL Live TV channels and guide programs");
+            UpdateProgress(0, 0, "Gathering all channels and guide programs...");
+            token.ThrowIfCancellationRequested();
+
+            var channels = GetChannelsFromDb();
+            var programs = GetAllProgramsFromDb();
+
+            _logger.LogInformation("Purging {Channels} channels and {Programs} programs", channels.Count, programs.Count);
+
+            var totalItems = programs.Count + channels.Count;
+            var processedItems = 0;
+            UpdateProgress(0, totalItems, $"Purging {channels.Count} channels...");
+
+            // Delete all channels first
+            var deletedChannels = BatchDeleteItems(channels, ref processedItems, totalItems, progress, token);
+
+            int deletedPrograms = 0;
+            var backgroundTaskStarted = false;
+
+            if (programs.Count > 0)
             {
-                deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
-            }
-            else
-            {
-                _ = Task.Run(() =>
+                if (FastDeleteMethod is not null || programs.Count <= 2000)
                 {
-                    try
+                    UpdateProgress(processedItems, totalItems, $"Purging {programs.Count} guide programs...");
+                    deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, token);
+                }
+                else
+                {
+                    backgroundTaskStarted = true;
+                    SwitchOperationPhase("Background Guide Purge", programs.Count, $"Purging {programs.Count} guide programs in background...");
+                    var bgToken = _activeCts?.Token ?? CancellationToken.None;
+
+                    _ = Task.Run(() =>
                     {
-                        var bgProcessed = 0;
-                        var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, null, CancellationToken.None);
-                        _logger.LogInformation("Background guide purge finished: {Count} programs deleted", bgDeleted);
-                    }
-                    catch (Exception bgEx)
-                    {
-                        _logger.LogWarning(bgEx, "Background guide purge error");
-                    }
-                });
-                _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
-                deletedPrograms = programs.Count;
+                        try
+                        {
+                            var bgProcessed = 0;
+                            var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, progress, bgToken);
+                            _logger.LogInformation("Background guide purge finished: {Count} programs deleted", bgDeleted);
+                            UpdateConfigStats(0, bgDeleted);
+                            EndOperation($"Background guide purge completed: {bgDeleted} programs deleted.");
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            _logger.LogWarning("Background guide purge stopped by user");
+                            EndOperation("Background guide purge stopped by user.");
+                        }
+                        catch (Exception bgEx)
+                        {
+                            _logger.LogWarning(bgEx, "Background guide purge error");
+                            EndOperation($"Background guide purge error: {bgEx.Message}");
+                        }
+                    });
+
+                    _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
+                    deletedPrograms = programs.Count;
+                }
             }
+
+            UpdateConfigStats(deletedChannels, deletedPrograms);
+
+            if (!backgroundTaskStarted)
+            {
+                EndOperation($"Full Live TV Reset complete. Removed {deletedChannels} channels and {deletedPrograms} guide programs.");
+            }
+
+            var result = new DeleteResultDto
+            {
+                Success = true,
+                Message = $"Full Live TV Reset complete. Removed {deletedChannels} channels and {deletedPrograms} guide programs.",
+                DeletedChannels = deletedChannels,
+                DeletedPrograms = deletedPrograms
+            };
+
+            _logger.LogInformation("Full Live TV Reset finished: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
+            return Task.FromResult(result);
         }
-
-        UpdateConfigStats(deletedChannels, deletedPrograms);
-
-        var result = new DeleteResultDto
+        catch (OperationCanceledException)
         {
-            Success = true,
-            Message = $"Full Live TV Reset complete. Removed {deletedChannels} channels and {deletedPrograms} guide programs.",
-            DeletedChannels = deletedChannels,
-            DeletedPrograms = deletedPrograms
-        };
-
-        _logger.LogInformation("Full Live TV Reset finished: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
-        return Task.FromResult(result);
+            _logger.LogWarning("Full Live TV Reset was stopped by user");
+            EndOperation("Full Live TV Reset was stopped by user.");
+            return Task.FromResult(new DeleteResultDto
+            {
+                Success = false,
+                Message = "Full Live TV Reset was stopped by user.",
+                DeletedChannels = 0,
+                DeletedPrograms = 0
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during full Live TV reset");
+            EndOperation($"Error: {ex.Message}");
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -316,49 +373,94 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Purging all Live TV guide programs from the database");
-
-        var programs = GetAllProgramsFromDb();
-        var totalItems = programs.Count;
-        var processedItems = 0;
-
-        int deletedPrograms = 0;
-        if (programs.Count > 0)
+        var token = BeginOperation("Purging Guide Programs", 0, cancellationToken);
+        try
         {
-            if (FastDeleteMethod is not null || programs.Count <= 2000)
+            _logger.LogInformation("Purging all Live TV guide programs from the database");
+            UpdateProgress(0, 0, "Gathering guide programs...");
+            token.ThrowIfCancellationRequested();
+
+            var programs = GetAllProgramsFromDb();
+            var totalItems = programs.Count;
+            var processedItems = 0;
+            UpdateProgress(0, totalItems, $"Purging {totalItems} guide programs...");
+
+            int deletedPrograms = 0;
+            var backgroundTaskStarted = false;
+
+            if (programs.Count > 0)
             {
-                deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, cancellationToken);
-            }
-            else
-            {
-                _ = Task.Run(() =>
+                if (FastDeleteMethod is not null || programs.Count <= 2000)
                 {
-                    try
+                    deletedPrograms = BatchDeleteItems(programs, ref processedItems, totalItems, progress, token);
+                }
+                else
+                {
+                    backgroundTaskStarted = true;
+                    SwitchOperationPhase("Background Guide Purge", programs.Count, $"Purging {programs.Count} guide programs in background...");
+                    var bgToken = _activeCts?.Token ?? CancellationToken.None;
+
+                    _ = Task.Run(() =>
                     {
-                        var bgProcessed = 0;
-                        var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, null, CancellationToken.None);
-                        _logger.LogInformation("Background guide program purge completed: {Count} programs deleted", bgDeleted);
-                    }
-                    catch (Exception bgEx)
-                    {
-                        _logger.LogWarning(bgEx, "Background guide program purge error");
-                    }
-                });
-                _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
-                deletedPrograms = programs.Count;
+                        try
+                        {
+                            var bgProcessed = 0;
+                            var bgDeleted = BatchDeleteItems(programs, ref bgProcessed, programs.Count, progress, bgToken);
+                            _logger.LogInformation("Background guide program purge completed: {Count} programs deleted", bgDeleted);
+                            UpdateConfigStats(0, bgDeleted);
+                            EndOperation($"Background guide program purge completed: {bgDeleted} programs deleted.");
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            _logger.LogWarning("Background guide program purge stopped by user");
+                            EndOperation("Background guide program purge stopped by user.");
+                        }
+                        catch (Exception bgEx)
+                        {
+                            _logger.LogWarning(bgEx, "Background guide program purge error");
+                            EndOperation($"Background guide program purge error: {bgEx.Message}");
+                        }
+                    });
+
+                    _logger.LogInformation("Queued background purge for {Count} guide programs to prevent HTTP timeout", programs.Count);
+                    deletedPrograms = programs.Count;
+                }
             }
+
+            if (!backgroundTaskStarted)
+            {
+                EndOperation($"Successfully purged {deletedPrograms} Live TV guide programs.");
+            }
+
+            var result = new DeleteResultDto
+            {
+                Success = true,
+                Message = $"Successfully purged {deletedPrograms} Live TV guide programs.",
+                DeletedChannels = 0,
+                DeletedPrograms = deletedPrograms
+            };
+
+            _logger.LogInformation("Guide purge completed: {Count} programs deleted", deletedPrograms);
+            return Task.FromResult(result);
         }
-
-        var result = new DeleteResultDto
+        catch (OperationCanceledException)
         {
-            Success = true,
-            Message = $"Successfully purged {deletedPrograms} Live TV guide programs.",
-            DeletedChannels = 0,
-            DeletedPrograms = deletedPrograms
-        };
-
-        _logger.LogInformation("Guide purge completed: {Count} programs deleted", deletedPrograms);
-        return Task.FromResult(result);
+            _logger.LogWarning("Guide purge stopped by user");
+            EndOperation("Guide purge was stopped by user.");
+            return Task.FromResult(new DeleteResultDto
+            {
+                Success = false,
+                Message = "Guide purge was stopped by user.",
+                DeletedChannels = 0,
+                DeletedPrograms = 0
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during guide purge");
+            EndOperation($"Error: {ex.Message}");
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -381,6 +483,179 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         }
 
         return Task.CompletedTask;
+    }
+
+    private static CancellationToken BeginOperation(string operationName, int totalItems, CancellationToken requestToken)
+    {
+        lock (SyncLock)
+        {
+            if (_currentProgress.IsRunning)
+            {
+                throw new InvalidOperationException($"Operation '{_currentProgress.OperationName}' is already in progress. Please wait or stop it first.");
+            }
+
+            _activeCts?.Dispose();
+            _activeCts = CancellationTokenSource.CreateLinkedTokenSource(requestToken);
+
+            _currentProgress = new OperationProgressDto
+            {
+                IsRunning = true,
+                OperationName = operationName,
+                ProcessedItems = 0,
+                TotalItems = totalItems,
+                Percent = 0,
+                Message = totalItems > 0 ? $"Starting {operationName} (0/{totalItems})..." : $"Starting {operationName}...",
+                CancellationRequested = false,
+                CanStop = true
+            };
+
+            return _activeCts.Token;
+        }
+    }
+
+    private static void UpdateProgress(int processed, int total, string? customMessage = null)
+    {
+        lock (SyncLock)
+        {
+            _currentProgress.ProcessedItems = processed;
+            _currentProgress.TotalItems = total;
+            var percent = total > 0 ? Math.Clamp((int)Math.Round((double)processed / total * 100), 0, 100) : 0;
+            _currentProgress.Percent = percent;
+            _currentProgress.Message = customMessage ?? $"Processed {processed:N0} of {total:N0} items ({percent}%)...";
+        }
+    }
+
+    private static void SwitchOperationPhase(string newOperationName, int newTotal, string initialMessage)
+    {
+        lock (SyncLock)
+        {
+            _currentProgress.OperationName = newOperationName;
+            _currentProgress.ProcessedItems = 0;
+            _currentProgress.TotalItems = newTotal;
+            _currentProgress.Percent = 0;
+            _currentProgress.Message = initialMessage;
+        }
+    }
+
+    private static void EndOperation(string completionMessage)
+    {
+        lock (SyncLock)
+        {
+            _currentProgress.IsRunning = false;
+            _currentProgress.Percent = 100;
+            _currentProgress.Message = completionMessage;
+            _currentProgress.CancellationRequested = false;
+            _activeCts?.Dispose();
+            _activeCts = null;
+        }
+    }
+
+    private Task<DeleteResultDto> DeleteChannelsInternalAsync(
+        IReadOnlyCollection<Guid> channelIds,
+        IProgress<double>? progress,
+        CancellationToken token)
+    {
+        if (channelIds.Count == 0)
+        {
+            EndOperation("No channels specified for deletion.");
+            return Task.FromResult(new DeleteResultDto
+            {
+                Success = true,
+                Message = "No channels specified for deletion.",
+                DeletedChannels = 0,
+                DeletedPrograms = 0
+            });
+        }
+
+        token.ThrowIfCancellationRequested();
+        _logger.LogInformation("Starting high-speed batch deletion of {Count} Live TV channels", channelIds.Count);
+
+        var channelIdSet = new HashSet<Guid>(channelIds);
+
+        UpdateProgress(0, channelIds.Count, "Gathering channels and guide programs...");
+        var allChannels = GetChannelsFromDb();
+        var targetChannels = allChannels.Where(c => channelIdSet.Contains(c.Id)).ToList();
+
+        var allPrograms = GetAllProgramsFromDb();
+        var targetPrograms = allPrograms.Where(p => channelIdSet.Contains(p.ParentId)).ToList();
+
+        _logger.LogInformation(
+            "Found {Channels} target channels and {Programs} associated guide programs to delete",
+            targetChannels.Count,
+            targetPrograms.Count);
+
+        var totalItems = targetPrograms.Count + targetChannels.Count;
+        var processedItems = 0;
+
+        UpdateProgress(0, totalItems, $"Deleting {targetChannels.Count} channels...");
+
+        // Step 1: Delete channels FIRST so they immediately disappear from the UI
+        var deletedChannels = BatchDeleteItems(targetChannels, ref processedItems, totalItems, progress, token);
+        _logger.LogInformation("Deleted {Channels} Live TV channels", deletedChannels);
+
+        // Step 2: Delete associated guide programs
+        int deletedPrograms = 0;
+        var backgroundTaskStarted = false;
+
+        if (targetPrograms.Count > 0)
+        {
+            if (FastDeleteMethod is not null || targetPrograms.Count <= 2000)
+            {
+                UpdateProgress(processedItems, totalItems, $"Deleting {targetPrograms.Count} guide programs...");
+                deletedPrograms = BatchDeleteItems(targetPrograms, ref processedItems, totalItems, progress, token);
+            }
+            else
+            {
+                // Background cleanup on Jellyfin 10.10.x for large sets to avoid HTTP timeout
+                backgroundTaskStarted = true;
+                SwitchOperationPhase("Background Guide Cleanup", targetPrograms.Count, $"Purging {targetPrograms.Count} guide programs in background...");
+
+                var bgToken = _activeCts?.Token ?? CancellationToken.None;
+
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var bgProcessed = 0;
+                        var bgDeleted = BatchDeleteItems(targetPrograms, ref bgProcessed, targetPrograms.Count, progress, bgToken);
+                        _logger.LogInformation("Background guide cleanup finished: {Count} programs deleted", bgDeleted);
+                        UpdateConfigStats(0, bgDeleted);
+                        EndOperation($"Background guide cleanup completed: {bgDeleted} programs deleted.");
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogWarning("Background guide cleanup stopped by user");
+                        EndOperation("Background guide cleanup stopped by user.");
+                    }
+                    catch (Exception bgEx)
+                    {
+                        _logger.LogWarning(bgEx, "Background guide cleanup error");
+                        EndOperation($"Background guide cleanup error: {bgEx.Message}");
+                    }
+                });
+
+                _logger.LogInformation("Queued background cleanup for {Count} guide programs to prevent HTTP timeout", targetPrograms.Count);
+                deletedPrograms = targetPrograms.Count;
+            }
+        }
+
+        UpdateConfigStats(deletedChannels, deletedPrograms);
+
+        if (!backgroundTaskStarted)
+        {
+            EndOperation($"Deletion complete: Removed {deletedChannels} channels and cleaned {deletedPrograms} guide programs.");
+        }
+
+        var result = new DeleteResultDto
+        {
+            Success = true,
+            Message = $"Deletion complete: Removed {deletedChannels} channels and cleaned {deletedPrograms} guide programs.",
+            DeletedChannels = deletedChannels,
+            DeletedPrograms = deletedPrograms
+        };
+
+        _logger.LogInformation("Channel deletion completed: {Channels} channels, {Programs} programs", deletedChannels, deletedPrograms);
+        return Task.FromResult(result);
     }
 
     private static MethodInfo? FindFastDeleteMethod()
@@ -438,10 +713,12 @@ public class LiveTvCleanerService : ILiveTvCleanerService
                         FastDeleteMethod.Invoke(_libraryManager, args);
                         deleted += chunk.Count;
                         processedItems += chunk.Count;
+                        UpdateProgress(processedItems, totalItems);
                         if (totalItems > 0)
                         {
                             progress?.Report((double)processedItems / totalItems * 100);
                         }
+
                         continue;
                     }
                 }
@@ -464,12 +741,16 @@ public class LiveTvCleanerService : ILiveTvCleanerService
                 {
                     _logger.LogError(itemEx, "Failed to delete item {Id} ({Type})", item.Id, item.GetType().Name);
                 }
-            }
 
-            processedItems += chunk.Count;
-            if (totalItems > 0)
-            {
-                progress?.Report((double)processedItems / totalItems * 100);
+                processedItems++;
+                if (processedItems % 10 == 0 || processedItems == totalItems)
+                {
+                    UpdateProgress(processedItems, totalItems);
+                    if (totalItems > 0)
+                    {
+                        progress?.Report((double)processedItems / totalItems * 100);
+                    }
+                }
             }
         }
 
@@ -557,6 +838,7 @@ public class LiveTvCleanerService : ILiveTvCleanerService
             {
                 result[ch.Id] = new ChannelStatusRecord(true, "No tuners configured");
             }
+
             return result;
         }
 
@@ -622,6 +904,7 @@ public class LiveTvCleanerService : ILiveTvCleanerService
         {
             sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
         }
+
         return sb.ToString();
     }
 
