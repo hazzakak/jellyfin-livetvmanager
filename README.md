@@ -20,7 +20,7 @@ A specialized Jellyfin plugin designed to solve the persistent issue where delet
 ## ✨ Features
 
 - **Dashboard Configuration Page (Native Web UI)**:
-  - Accessible via **Dashboard → Plugins → Live TV Cleaner**.
+  - **Direct Sidebar Link**: Appears directly in the Jellyfin Dashboard sidebar navigation under the **Plugins** section (and under **Live TV**) as **Live TV Cleaner** with a dedicated icon — no need to navigate through Plugins > Card > Settings!
   - **Live Metric Cards**: Total channels, active channels, orphaned channels, guide programs, and configured tuners.
   - **🧹 Clean Orphaned Channels**: Automatically detects channels that no longer match any active tuner and safely removes them and their associated programs.
   - **⚠️ Reset All Live TV Channels**: Completely purges all Live TV channels and guide programs from the database to give you a clean slate for re-importing.
