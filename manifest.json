@@ -8,6 +8,14 @@
     "category": "Live TV",
     "versions": [
       {
+        "version": "1.0.5.0",
+        "changelog": "Release v1.0.5",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://github.com/hazzakak/jellyfin-livetvmanager/releases/download/v1.0.5/Jellyfin.Plugin.LiveTvCleaner_1.0.5.0.zip",
+        "checksum": "3f16114567eaeaa74ff122237b089448",
+        "timestamp": "2026-10-08T16:45:53Z"
+      },
+      {
         "version": "1.0.4.0",
         "changelog": "Release v1.0.4",
         "targetAbi": "10.10.0.0",
