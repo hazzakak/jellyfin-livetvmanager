@@ -233,8 +233,11 @@
 
         <div data-role="content">
             <div class="content-primary cleaner-container">
-                <div class="sectionTitleContainer">
-                    <h2 class="sectionTitle">Live TV Cleaner &amp; Channel Manager</h2>
+                <div class="sectionTitleContainer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5em; margin-bottom:1em;">
+                    <div style="display:flex; align-items:center; gap:0.8em; flex-wrap:wrap;">
+                        <h2 class="sectionTitle" style="margin:0;">Live TV Cleaner &amp; Channel Manager</h2>
+                        <span id="pluginVersionBadge" class="badge" style="background: rgba(0, 164, 220, 0.2); color: #00a4dc; border: 1px solid rgba(0, 164, 220, 0.4); font-size: 0.85em; font-weight:700; padding: 0.3em 0.8em; border-radius: 4px;">v1.0.4.0</span>
+                    </div>
                 </div>
 
                 <div class="alert-box">
@@ -553,6 +556,10 @@
                                 document.querySelector('#statLastClean').textContent = d.toLocaleDateString() + ' (' + status.LastCleanedCount + ')';
                             } else {
                                 document.querySelector('#statLastClean').textContent = 'Never';
+                            }
+
+                            if (status.PluginVersion) {
+                                document.querySelector('#pluginVersionBadge').textContent = 'v' + status.PluginVersion;
                             }
                         })
                         .catch(function (err) {

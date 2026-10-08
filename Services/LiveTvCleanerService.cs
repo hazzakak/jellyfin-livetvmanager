@@ -129,7 +129,8 @@ public class LiveTvCleanerService : ILiveTvCleanerService
                 Type = t.Type ?? string.Empty
             }).ToList(),
             LastCleanDate = config?.LastCleanDate,
-            LastCleanedCount = config?.LastCleanedCount ?? 0
+            LastCleanedCount = config?.LastCleanedCount ?? 0,
+            PluginVersion = Plugin.PluginVersion
         };
 
         return Task.FromResult(status);

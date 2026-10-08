@@ -24,24 +24,29 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Build in Release mode
-        run: dotnet build -c Release
-
-      - name: Prepare Release Package
-        id: package
+      - name: Compute Version
+        id: version_info
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
-            VERSION="1.0.0.0"
+            VERSION="1.0.4.0"
           fi
-          # Ensure 4-digit version format for Jellyfin (e.g. 1.0.0 -> 1.0.0.0)
+          # Ensure 4-digit version format for Jellyfin (e.g. 1.0.4 -> 1.0.4.0)
           DOT_COUNT=$(echo "$VERSION" | tr -cd '.' | wc -c)
           if [ "$DOT_COUNT" -eq 2 ]; then
             FULL_VERSION="${VERSION}.0"
           else
             FULL_VERSION="$VERSION"
           fi
-          
+          echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build in Release mode
+        run: dotnet build -c Release -p:Version=${{ steps.version_info.outputs.full_version }} -p:AssemblyVersion=${{ steps.version_info.outputs.full_version }} -p:FileVersion=${{ steps.version_info.outputs.full_version }}
+
+      - name: Prepare Release Package
+        id: package
+        run: |
+          FULL_VERSION="${{ steps.version_info.outputs.full_version }}"
           ZIP_NAME="Jellyfin.Plugin.LiveTvCleaner_${FULL_VERSION}.zip"
           zip -j "$ZIP_NAME" bin/Release/net9.0/Jellyfin.Plugin.LiveTvCleaner.dll
           

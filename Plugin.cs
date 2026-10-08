@@ -35,6 +35,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public override Guid Id => Guid.Parse("a5d6f3e1-8842-4217-bf41-4824e86dbdf9");
 
     /// <summary>
+    /// Gets the current plugin version as a string.
+    /// </summary>
+    public static string PluginVersion => typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "1.0.4.0";
+
+    /// <summary>
     /// Gets the current plugin instance.
     /// </summary>
     public static Plugin? Instance { get; private set; }

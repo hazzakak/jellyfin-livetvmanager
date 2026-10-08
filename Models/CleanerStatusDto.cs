@@ -42,6 +42,11 @@ public class CleanerStatusDto
     /// Gets or sets the channel count deleted during the last cleanup.
     /// </summary>
     public int LastCleanedCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets the version of the currently loaded plugin.
+    /// </summary>
+    public string PluginVersion { get; set; } = string.Empty;
 }
 
 /// <summary>
