@@ -58,21 +58,29 @@ jobs:
           files: ${{ steps.package.outputs.zip_name }}
           generate_release_notes: true
 
-      - name: Update manifest.json
+      - name: Update and push manifest.json to main
         if: startsWith(github.ref, 'refs/tags/')
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Switch to main and fetch latest commits to avoid race conditions
+          git fetch origin main
+          git checkout main
+          git pull origin main --rebase
+
           python3 -c "
           import json, datetime
-          
+
           with open('manifest.json', 'r') as f:
               data = json.load(f)
-          
+
           plugin = data[0]
           tag = '${{ github.ref_name }}'
           version = '${{ steps.package.outputs.version }}'
           checksum = '${{ steps.package.outputs.checksum }}'
           zip_name = '${{ steps.package.outputs.zip_name }}'
-          
+
           new_version = {
               'version': version,
               'changelog': f'Release {tag}',
@@ -81,19 +89,18 @@ jobs:
               'checksum': checksum,
               'timestamp': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
           }
-          
+
           # Avoid duplicate versions
           plugin['versions'] = [v for v in plugin.get('versions', []) if v.get('version') != version]
           plugin['versions'].insert(0, new_version)
-          
+
           with open('manifest.json', 'w') as f:
               json.dump(data, f, indent=2)
           "
 
-      - name: Commit and push updated manifest.json
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add manifest.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(release): update manifest.json for ${{ github.ref_name }}" && git push origin HEAD:main)
+          if ! git diff --quiet --staged; then
+            git commit -m "chore(release): update manifest.json for ${{ github.ref_name }}"
+            git pull --rebase origin main
+            git push origin main
+          fi
