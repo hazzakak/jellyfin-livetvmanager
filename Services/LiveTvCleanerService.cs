@@ -1,12 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.LiveTvCleaner.Configuration;
 using Jellyfin.Plugin.LiveTvCleaner.Models;
@@ -465,7 +469,248 @@ public class LiveTvCleanerService : ILiveTvCleanerService
     }
 
     /// <inheritdoc />
+    public async Task<DeleteResultDto> SyncChannelLineupAsync(
+        IProgress<double>? progress,
+        CancellationToken cancellationToken)
+    {
+        var sw = Stopwatch.StartNew();
+        var token = BeginOperation("Syncing Live TV Channel Lineup (No EPG)", 0, cancellationToken);
+        try
+        {
+            _logger.LogInformation("Starting fast Live TV channel lineup sync (without EPG refresh)");
+            UpdateProgress(0, 0, "Fetching latest channel lineup from tuners...");
+            token.ThrowIfCancellationRequested();
+
+            var channels = GetChannelsFromDb();
+            var tuners = GetConfiguredTuners();
+
+            var byPath = new Dictionary<string, (string Name, string Number)>(StringComparer.OrdinalIgnoreCase);
+            var byExtId = new Dictionary<string, (string Name, string Number)>(StringComparer.OrdinalIgnoreCase);
+            var byNumber = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+            // 1. Directly fetch /lineup.json from any configured HDHomeRun tuner (e.g. Dispatcharr) for zero-cache accuracy
+            foreach (var tuner in tuners)
+            {
+                if (string.IsNullOrWhiteSpace(tuner.Url))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var lineupUrl = tuner.Url.TrimEnd('/') + "/lineup.json";
+                    using var resp = await httpClient.GetAsync(lineupUrl, token).ConfigureAwait(false);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        var json = await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+                        using var doc = JsonDocument.Parse(json);
+                        if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var elem in doc.RootElement.EnumerateArray())
+                            {
+                                var gNum = elem.TryGetProperty("GuideNumber", out var pNum) ? pNum.GetString()?.Trim() ?? string.Empty : string.Empty;
+                                var gName = elem.TryGetProperty("GuideName", out var pName) ? pName.GetString()?.Trim() ?? string.Empty : string.Empty;
+                                var gUrl = elem.TryGetProperty("URL", out var pUrl) ? pUrl.GetString()?.Trim() ?? string.Empty : string.Empty;
+
+                                if (string.IsNullOrWhiteSpace(gName))
+                                {
+                                    continue;
+                                }
+
+                                if (!string.IsNullOrWhiteSpace(gUrl))
+                                {
+                                    byPath[gUrl] = (gName, gNum);
+                                }
+
+                                if (!string.IsNullOrWhiteSpace(gNum))
+                                {
+                                    byNumber[gNum] = gName;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Direct HDHR lineup.json query skipped/failed for tuner {Url}", tuner.Url);
+                }
+            }
+
+            // 2. Also query active ILiveTvService instances for M3U / other tuners
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
+
+                var services = _liveTvManager.Services;
+                if (services != null)
+                {
+                    foreach (var service in services)
+                    {
+                        if (service == null)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            var serviceChannels = await service.GetChannelsAsync(linkedCts.Token).ConfigureAwait(false);
+                            if (serviceChannels != null)
+                            {
+                                foreach (var sc in serviceChannels)
+                                {
+                                    var scName = sc.Name?.Trim() ?? string.Empty;
+                                    var scNum = sc.Number?.Trim() ?? string.Empty;
+                                    if (string.IsNullOrWhiteSpace(scName))
+                                    {
+                                        continue;
+                                    }
+
+                                    if (!string.IsNullOrWhiteSpace(sc.Id))
+                                    {
+                                        byExtId.TryAdd(sc.Id, (scName, scNum));
+                                    }
+
+                                    if (!string.IsNullOrWhiteSpace(sc.TunerChannelId))
+                                    {
+                                        byExtId.TryAdd(sc.TunerChannelId, (scName, scNum));
+                                    }
+
+                                    if (!string.IsNullOrWhiteSpace(sc.Path))
+                                    {
+                                        byPath.TryAdd(sc.Path.Trim(), (scName, scNum));
+                                    }
+
+                                    if (!string.IsNullOrWhiteSpace(scNum))
+                                    {
+                                        byNumber.TryAdd(scNum, scName);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to query channels from Live TV service {ServiceName}", service.Name);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to query Live TV services during lineup sync");
+            }
+
+            // 3. Compare DB channels against latest lineup and collect modified items
+            var updatedChannels = new List<BaseItem>();
+            foreach (var channel in channels)
+            {
+                token.ThrowIfCancellationRequested();
+
+                string? targetName = null;
+                string? targetNumber = null;
+
+                if (!string.IsNullOrWhiteSpace(channel.Path) && byPath.TryGetValue(channel.Path.Trim(), out var pathMatch))
+                {
+                    targetName = pathMatch.Name;
+                    targetNumber = pathMatch.Number;
+                }
+                else if (!string.IsNullOrWhiteSpace(channel.ExternalId) && byExtId.TryGetValue(channel.ExternalId.Trim(), out var extMatch))
+                {
+                    targetName = extMatch.Name;
+                    targetNumber = extMatch.Number;
+                }
+                else if (!string.IsNullOrWhiteSpace(channel.Number) && byNumber.TryGetValue(channel.Number.Trim(), out var numMatchName))
+                {
+                    targetName = numMatchName;
+                }
+
+                if (string.IsNullOrWhiteSpace(targetName))
+                {
+                    continue;
+                }
+
+                var changed = false;
+                if (!string.Equals(channel.Name?.Trim(), targetName, StringComparison.Ordinal))
+                {
+                    channel.Name = targetName;
+                    changed = true;
+                }
+
+                if (!string.IsNullOrWhiteSpace(targetNumber) && !string.Equals(channel.Number?.Trim(), targetNumber, StringComparison.Ordinal))
+                {
+                    channel.Number = targetNumber;
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    updatedChannels.Add(channel);
+                }
+            }
+
+            // 4. Persist only the changed channels in chunks
+            var processed = 0;
+            var totalToUpdate = updatedChannels.Count;
+            if (totalToUpdate > 0)
+            {
+                UpdateProgress(0, totalToUpdate, $"Updating {totalToUpdate} changed channel names in database...");
+                for (var i = 0; i < totalToUpdate; i += BatchChunkSize)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var chunk = updatedChannels.Skip(i).Take(BatchChunkSize).ToList();
+                    var parent = chunk[0].GetParent();
+                    await _libraryManager.UpdateItemsAsync(chunk, parent, ItemUpdateType.MetadataEdit, token).ConfigureAwait(false);
+                    processed += chunk.Count;
+                    UpdateProgress(processed, totalToUpdate);
+                    progress?.Report((double)processed / totalToUpdate * 100);
+                }
+            }
+            else
+            {
+                progress?.Report(100);
+            }
+
+            sw.Stop();
+            var msg = totalToUpdate > 0
+                ? $"Fast Lineup Sync complete: Updated {totalToUpdate} channel names (out of {channels.Count} channels) in {sw.ElapsedMilliseconds}ms."
+                : $"Fast Lineup Sync complete: All {channels.Count} channels are already up to date ({sw.ElapsedMilliseconds}ms).";
+
+            _logger.LogInformation("{Message}", msg);
+            EndOperation(msg);
+
+            return new DeleteResultDto
+            {
+                Success = true,
+                Message = msg,
+                DeletedChannels = totalToUpdate,
+                DeletedPrograms = 0
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Live TV lineup sync stopped by user");
+            EndOperation("Live TV lineup sync was stopped by user.");
+            return new DeleteResultDto
+            {
+                Success = false,
+                Message = "Live TV lineup sync was stopped by user.",
+                DeletedChannels = 0,
+                DeletedPrograms = 0
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during Live TV lineup sync");
+            EndOperation($"Error: {ex.Message}");
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
     public Task RefreshGuideAsync(CancellationToken cancellationToken)
+
     {
         _logger.LogInformation("Triggering guide refresh scheduled task");
 

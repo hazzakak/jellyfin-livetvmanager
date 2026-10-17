@@ -236,8 +236,9 @@
                 <div class="sectionTitleContainer" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0.5em; margin-bottom:1em;">
                     <div style="display:flex; align-items:center; gap:0.8em; flex-wrap:wrap;">
                         <h2 class="sectionTitle" style="margin:0;">Live TV Cleaner &amp; Channel Manager</h2>
-                        <span id="pluginVersionBadge" class="badge" style="background: rgba(0, 164, 220, 0.2); color: #00a4dc; border: 1px solid rgba(0, 164, 220, 0.4); font-size: 0.85em; font-weight:700; padding: 0.3em 0.8em; border-radius: 4px;">v1.0.5.0</span>
+                        <span id="pluginVersionBadge" class="badge" style="background: rgba(0, 164, 220, 0.2); color: #00a4dc; border: 1px solid rgba(0, 164, 220, 0.4); font-size: 0.85em; font-weight:700; padding: 0.3em 0.8em; border-radius: 4px;">v1.0.6.0</span>
                     </div>
+
                 </div>
 
                 <div class="alert-box">
@@ -299,6 +300,9 @@
 
                 <!-- Action Buttons -->
                 <div class="actions-bar">
+                    <button is="emby-button" type="button" id="btnSyncLineup" class="raised button-accent emby-button">
+                        <span>Sync Lineup Names (No EPG)</span>
+                    </button>
                     <button is="emby-button" type="button" id="btnCleanOrphaned" class="raised button-accent emby-button">
                         <span>Clean Orphaned Channels</span>
                     </button>
@@ -315,6 +319,7 @@
                         <span>Reload Status</span>
                     </button>
                 </div>
+
 
                 <!-- Filter & Search Bar -->
                 <div class="filter-bar">
@@ -399,7 +404,8 @@
                 }
 
                 function setButtonsDisabled(disabled) {
-                    var ids = ['#btnCleanOrphaned', '#btnResetAll', '#btnPurgePrograms', '#btnRefreshGuide', '#btnReload', '#btnDeleteSelected'];
+                    var ids = ['#btnSyncLineup', '#btnCleanOrphaned', '#btnResetAll', '#btnPurgePrograms', '#btnRefreshGuide', '#btnReload', '#btnDeleteSelected'];
+
                     ids.forEach(function (sel) {
                         var el = document.querySelector(sel);
                         if (el) el.disabled = disabled;
@@ -809,6 +815,23 @@
                     });
                 }
 
+                function syncLineup() {
+                    startProgressPolling('Syncing Live TV Channel Lineup (No EPG)');
+                    makeApiRequest('SyncLineup', 'POST')
+                        .then(function (result) {
+                            stopProgressPolling();
+                            Dashboard.alert(result.Message || 'Channel lineup synced.');
+                            loadStatus();
+                            loadChannels();
+                        })
+                        .catch(function (err) {
+                            stopProgressPolling();
+                            Dashboard.alert('Error syncing channel lineup: ' + (err.responseJSON ? err.responseJSON.Message : err));
+                            loadStatus();
+                            loadChannels();
+                        });
+                }
+
                 function refreshGuide() {
                     makeApiRequest('RefreshGuide', 'POST')
                         .then(function () {
@@ -854,7 +877,9 @@
                 }, 300);
 
                 document.querySelector('#btnStopOperation').addEventListener('click', stopCurrentOperation);
+                document.querySelector('#btnSyncLineup').addEventListener('click', syncLineup);
                 document.querySelector('#btnCleanOrphaned').addEventListener('click', cleanOrphanedChannels);
+
                 document.querySelector('#btnResetAll').addEventListener('click', resetAllChannels);
                 document.querySelector('#btnPurgePrograms').addEventListener('click', purgeGuideData);
                 document.querySelector('#btnRefreshGuide').addEventListener('click', refreshGuide);

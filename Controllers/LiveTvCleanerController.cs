@@ -221,6 +221,28 @@ public class LiveTvCleanerController : ControllerBase
     }
 
     /// <summary>
+    /// Fast-syncs Live TV channel names and numbers from configured tuners without refreshing EPG programs.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Sync result.</returns>
+    [HttpPost("SyncLineup")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<DeleteResultDto>> SyncLineup(CancellationToken cancellationToken)
+    {
+        try
+        {
+            _logger.LogInformation("Admin requested fast Live TV channel lineup sync (without EPG)");
+            var result = await _cleanerService.SyncChannelLineupAsync(null, cancellationToken).ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new DeleteResultDto { Success = false, Message = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Triggers the server's Refresh Guide scheduled task.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -234,3 +256,4 @@ public class LiveTvCleanerController : ControllerBase
         return NoContent();
     }
 }
+

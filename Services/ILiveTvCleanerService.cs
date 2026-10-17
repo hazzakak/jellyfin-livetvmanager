@@ -67,6 +67,14 @@ public interface ILiveTvCleanerService
     Task<DeleteResultDto> ClearAllProgramsAsync(IProgress<double>? progress, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Fast-syncs Live TV channel names and numbers from configured tuners without refreshing EPG guide programs.
+    /// </summary>
+    /// <param name="progress">Optional progress reporter.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Sync result.</returns>
+    Task<DeleteResultDto> SyncChannelLineupAsync(IProgress<double>? progress, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Triggers a guide and channels refresh via the server's task manager.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -85,3 +93,4 @@ public interface ILiveTvCleanerService
     /// <returns>True if an operation was active and cancellation requested; otherwise false.</returns>
     bool CancelCurrentOperation();
 }
+
